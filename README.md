@@ -6,9 +6,27 @@ Like an ant colony, specialized agents divide work, operate independently, share
 
 ## Status
 
-Ants is currently in the architecture and implementation-planning phase. The repository starts from a detailed, evidence-bounded master plan rather than a disposable prototype.
+The foundation tranche is implemented and green: a deterministic vertical slice runs end to end — request → plan/spec → isolated parallel tasks → integration → tests → evidence-based report — with real git commits and really executed verification commands.
 
-Read the [master plan](docs/MASTER_PLAN.md) for the complete product and implementation strategy. The condensed [resources index](docs/RESOURCES.md) links directly to the repositories, documentation, papers, and product research that can accelerate development.
+Read the [master plan](docs/MASTER_PLAN.md) for the complete product and implementation strategy. The condensed [resources index](docs/RESOURCES.md) links directly to the repositories, documentation, papers, and product research that accelerate development. Architecture decisions live in [docs/adr](docs/adr); the current implementation state and its proof matrix live in [docs/TRANCHE_1_EVIDENCE.md](docs/TRANCHE_1_EVIDENCE.md).
+
+## Quick start
+
+```sh
+make build
+./bin/ants demo run            # full pipeline: real commits + real test execution
+./bin/ants demo run --scm memory --sandbox fake   # scripted variant (no subprocesses)
+make ci                        # complete quality gate
+```
+
+Serve the HTTP API locally:
+
+```sh
+./bin/ants serve --config config/ants.example.yaml
+curl -s localhost:8080/healthz
+```
+
+The API is specified by [openapi/v1/openapi.yaml](openapi/v1/openapi.yaml); TypeScript types are generated into `packages/contracts`.
 
 ## Principles
 
@@ -19,6 +37,20 @@ Read the [master plan](docs/MASTER_PLAN.md) for the complete product and impleme
 - Keep self-hosted and managed-cloud deployments on the same open-source core.
 - Reuse mature open-source infrastructure instead of rebuilding commodity layers.
 - Reject hardcoded demos, fake production paths, and AI-generated slop.
+
+## Layout
+
+| Path | Purpose |
+| --- | --- |
+| `cmd/ants`, `cmd/api` | CLI and API server binaries |
+| `internal/domain` | Entities, typed IDs, error taxonomy, state machines |
+| `internal/ports` | Persistence/driver seams |
+| `internal/orchestration` | Deterministic run pipeline |
+| `internal/sandbox`, `internal/scm` | Driver ports + tranche-1 drivers |
+| `internal/policy`, `internal/review` | Capability boundary and ready gate |
+| `internal/server` | `/v1` HTTP API |
+| `db/migrations` | PostgreSQL schema (embedded, forward-only) |
+| `packages/contracts` | Generated TypeScript API types |
 
 ## Intended stack
 
@@ -34,4 +66,4 @@ Apache License 2.0. See [LICENSE](LICENSE).
 
 ## Safety
 
-Ants is intended to execute untrusted, AI-generated code. The project is not production-ready yet. Do not expose early builds to untrusted repositories, credentials, or public networks.
+Ants is intended to execute untrusted, AI-generated code. The project is not production-ready yet; the current sandbox is not a security boundary (see [SECURITY.md](SECURITY.md) and ADR-0003). Do not expose early builds to untrusted repositories, credentials, or public networks.
