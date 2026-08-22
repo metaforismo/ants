@@ -1,6 +1,7 @@
 #!/bin/sh
-# Provisions a disposable PostgreSQL container, runs the migration
-# integration tests against it, and tears everything down.
+# Provisions a disposable PostgreSQL container and runs every store-level
+# integration test against it (migrations + full behavioral contract suite),
+# then tears everything down.
 # Usage: scripts/test-postgres.sh [keep]
 set -eu
 
@@ -34,7 +35,7 @@ done
 
 export ANTS_TEST_PG_DSN="postgres://ants:ants@127.0.0.1:$PORT/$DB?sslmode=disable"
 status=0
-go test -count=1 -race ./internal/store/migrate/ || status=$?
+go test -count=1 -race ./internal/store/... || status=$?
 
 cleanup "${1:-}"
 exit "$status"

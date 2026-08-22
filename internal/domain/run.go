@@ -68,6 +68,7 @@ type Run struct {
 	SpecID         SpecID       `json:"spec_id,omitempty"`
 	Status         RunStatus    `json:"status"`
 	IdempotencyKey string       `json:"idempotency_key"`
+	Principal      PrincipalID  `json:"principal,omitempty"`
 	TaskIDs        []TaskID     `json:"task_ids"`
 	Report         *RunReport   `json:"report,omitempty"`
 	Version        int64        `json:"version"`
@@ -100,6 +101,13 @@ func NewRun(id RunID, tenantID TenantID, threadID ThreadID, idempotencyKey strin
 		CreatedAt:      now,
 		UpdatedAt:      now,
 	}, nil
+}
+
+// WithPrincipal attributes the run to its originating principal. Kept off
+// the constructor so existing call sites stay honest about who started what.
+func (r *Run) WithPrincipal(p PrincipalID) *Run {
+	r.Principal = p
+	return r
 }
 
 func (r *Run) TransitionTo(next RunStatus) error {
