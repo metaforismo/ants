@@ -13,21 +13,7 @@ func timeNow() time.Time { return time.Now().UTC() }
 // carry one; otherwise it joins the caller's transaction so both participate
 // in the same unit of work.
 func withinAutoTx(ctx context.Context, s *Store, fn func(ctx context.Context) error) error {
-	if txFrom(ctx) != nil {
-		return fn(ctx)
-	}
-	tx, err := s.pool.BeginTx(ctx, nil)
-	if err != nil {
-		return domain.Internalf(err, "db_tx", "begin transaction")
-	}
-	if err := fn(withTx(ctx, tx)); err != nil {
-		_ = tx.Rollback()
-		return err
-	}
-	if err := tx.Commit(); err != nil {
-		return domain.Internalf(err, "db_tx", "commit transaction")
-	}
-	return nil
+	return s.Do(ctx, fn)
 }
 
 // classifyStaleOrMissing distinguishes an optimistic-concurrency conflict

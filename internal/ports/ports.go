@@ -107,3 +107,12 @@ type EventLog interface {
 	ListByTenant(ctx context.Context, tenantID domain.TenantID, afterSeq int64, limit int) ([]*domain.Event, error)
 	ListByRun(ctx context.Context, tenantID domain.TenantID, runID domain.RunID, afterSeq int64, limit int) ([]*domain.Event, error)
 }
+
+// Transactor delimits a unit of work: every store operation performed by fn
+// on the returned context commits together, or — on error or panic — rolls
+// back together. Nesting joins the outer unit; no nested transaction is
+// created. Isolation and retry posture are documented per implementation
+// (ADR-0010).
+type Transactor interface {
+	Do(ctx context.Context, fn func(ctx context.Context) error) error
+}

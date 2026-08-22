@@ -11,7 +11,6 @@ import (
 	_ "github.com/jackc/pgx/v5/stdlib"
 
 	migrations "github.com/metaforismo/ants/db"
-	"github.com/metaforismo/ants/internal/ports"
 	"github.com/metaforismo/ants/internal/store/migrate"
 	"github.com/metaforismo/ants/internal/store/pgtestutil"
 	pgrepos "github.com/metaforismo/ants/internal/store/postgres"
@@ -50,9 +49,9 @@ func TestPostgresStoreContract(t *testing.T) {
 	repos := store.Repositories()
 	// Each contract subtest starts from an emptied schema; truncation always
 	// goes through the long-lived pool so it never races store teardown.
-	storetest.Run(t, func() ports.Repositories {
+	storetest.Run(t, func() storetest.World {
 		truncateAll(ctx, t, pool)
-		return repos
+		return storetest.World{Repos: repos, Tx: store}
 	})
 }
 
