@@ -1,0 +1,35 @@
+# Third-party dependency manifest.
+#
+# Source of verified provenance for every adopted dependency: license,
+# pinned version, adoption decision, and review notes. scripts/manifestcheck
+# (make manifest-check) fails when a direct go.mod dependency is missing here.
+#
+# Rules (ADR-0008): permissive licenses only in-process (Apache/MIT/BSD/MPL);
+# pin exact versions; record upstream health notes at adoption time.
+
+version: 1
+dependencies:
+  - module: gopkg.in/yaml.v3
+    version: v3.0.1
+    license: MIT
+    decision: adopt
+    purpose: Configuration file parsing and the capability catalog format.
+      Strict decoding (unknown fields rejected) is enforced by callers.
+    notes: Mature, minimal transitive surface. Upstream is in maintenance
+      mode with wide industry usage; API stable for years.
+
+  - module: github.com/jackc/pgx/v5
+    version: v5.7.6
+    license: MIT
+    decision: adopt
+    purpose: PostgreSQL connectivity for migrations (pgx stdlib database/sql
+      driver). The planned domain-store adapter uses the same driver.
+    notes: Reference PostgreSQL driver for Go per master plan section 14.6.
+
+  - module: openapi-typescript (npm, packages/contracts devDependency)
+    version: 7.13.0
+    license: MIT
+    decision: adopt
+    purpose: Generates TypeScript types from openapi/v1/openapi.yaml so web
+      clients consume generated shapes instead of hand-copied ones.
+    notes: Zero-runtime-dependency generator; output committed for review.

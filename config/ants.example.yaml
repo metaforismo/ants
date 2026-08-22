@@ -1,0 +1,60 @@
+# Ants example configuration.
+#
+# Layering: built-in defaults < this file < ANTS_* environment variables.
+# Every field shown here overrides a documented default; delete fields to fall
+# back to the default. Unknown keys are rejected at startup.
+#
+# Secrets never belong in files. Provide the Postgres DSN via
+# ANTS_STORE_POSTGRES_DSN; diagnostics always render secrets as [REDACTED].
+
+server:
+  # Loopback by default. Exposing Ants publicly requires an authenticated edge;
+  # dev header auth below must stay off for anything non-local.
+  http_addr: "127.0.0.1:8080"
+  # Development-only authentication: trusts X-Ants-Dev-Tenant /
+  # X-Ants-Dev-Principal headers. NEVER enable outside local development;
+  # production deployments use OIDC (planned) and leave this false.
+  dev_header_auth: true
+  read_timeout: 10s
+  write_timeout: 30s
+  shutdown_timeout: 10s
+
+store:
+  # memory: deterministic zero-dependency mode for development and tests.
+  # postgres: durable mode; requires ANTS_STORE_POSTGRES_DSN.
+  mode: memory
+
+orchestrator:
+  max_parallel_tasks: 4
+  # Hard budget caps enforced per run; exceeding them fails the run
+  # explicitly with a budget finding instead of overspending silently.
+  max_tasks_per_run: 8
+  max_exec_ops_per_run: 64
+  task_timeout: 2m
+  stage_timeout: 5m
+  max_attempts: 3
+  retry_backoff_base: 100ms
+
+sandbox:
+  # process: executes allow-listed commands inside a rooted workspace
+  # directory on this host. It is NOT a security boundary; microVM drivers
+  # arrive with Horizon 2. fake: records scripted effects without executing.
+  driver: process
+  # Empty means a per-run temporary directory managed by the driver.
+  work_root: ""
+
+scm:
+  # local_git: real git commits/diffs inside the sandbox workspace root.
+  # memory: in-memory file trees with content-derived SHAs, for hermetic tests.
+  driver: local_git
+
+policy:
+  # Local commits inside task workspaces may be allowed. Pushing, merging to
+  # protected branches, network access, secret reads, destructive host
+  # mutation, and global package installs are denied unconditionally; there is
+  # no configuration flag to re-enable them in this release.
+  allow_local_commits: true
+
+log:
+  level: info
+  format: text
