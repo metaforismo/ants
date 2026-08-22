@@ -76,6 +76,7 @@ type Store struct {
 	Integrations    IntegrationRepository
 	Events          EventRepository
 	Outbox          OutboxRepository
+	RunClaims       RunClaimRepository
 }
 
 // Repositories bundles the store into the aggregate the application wires.
@@ -94,6 +95,7 @@ func (s *Store) Repositories() ports.Repositories {
 		Integrations:    &s.Integrations,
 		Events:          &s.Events,
 		Outbox:          &s.Outbox,
+		RunClaims:       &s.RunClaims,
 	}
 }
 
@@ -110,6 +112,8 @@ var (
 	_ ports.PolicyDecisionStore = (*PolicyDecisionRepository)(nil)
 	_ ports.IntegrationStore    = (*IntegrationRepository)(nil)
 	_ ports.EventLog            = (*EventRepository)(nil)
+	_ ports.OutboxStore         = (*OutboxRepository)(nil)
+	_ ports.RunClaimStore       = (*RunClaimRepository)(nil)
 )
 
 // New opens the pool with validated options.
@@ -147,6 +151,7 @@ func New(ctx context.Context, opts Options) (*Store, error) {
 	s.Integrations = IntegrationRepository{st: s}
 	s.Events = EventRepository{st: s}
 	s.Outbox = OutboxRepository{st: s}
+	s.RunClaims = RunClaimRepository{st: s}
 	return s, nil
 }
 

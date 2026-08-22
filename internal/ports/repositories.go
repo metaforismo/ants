@@ -17,4 +17,5 @@ type Repositories struct {
 	Integrations    IntegrationStore
 	Events          EventLog
 	Outbox          OutboxStore
+	RunClaims       RunClaimStore
 }

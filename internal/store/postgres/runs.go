@@ -146,7 +146,7 @@ func (r *RunRepository) Update(ctx context.Context, run *domain.Run, expectedVer
 	res, uerr := r.st.q(ctx).ExecContext(ctx,
 		`UPDATE runs
 		 SET spec_id = NULLIF($3,'')::text, status = $4, task_ids = $5, report = $6,
-		     principal = NULLIF($7,'')::text, failure = $8, updated_at = $9,
+		     principal = $7, failure = $8, updated_at = $9,
 		     version = version + 1, finished_at = $10
 		 WHERE id = $1 AND tenant_id = $2 AND version = $11`,
 		string(run.ID), string(run.TenantID), string(run.SpecID), string(run.Status),
