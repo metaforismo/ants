@@ -151,6 +151,19 @@ type Outbox struct {
 	RetryBackoffBase Duration `yaml:"retry_backoff_base"`
 }
 
+// Worker bounds the process-level run executor that claims durable run
+// claims and drives them through the engine (ADR-0012 part 2). The lease
+// must leave room for missed heartbeats: lease >= 3x heartbeat_every means
+// two consecutive lost beats still renew inside the window.
+type Worker struct {
+	BatchSize      int      `yaml:"batch_size"`
+	Interval       Duration `yaml:"interval"`
+	Lease          Duration `yaml:"lease"`
+	HeartbeatEvery Duration `yaml:"heartbeat_every"`
+	CleanupTimeout Duration `yaml:"cleanup_timeout"`
+	Concurrency    int      `yaml:"concurrency"`
+}
+
 func (o Outbox) Validate() error {
 	if o.BatchSize < 1 || o.BatchSize > 1000 {
 		return fmt.Errorf("outbox.batch_size must be within [1,1000], got %d", o.BatchSize)
@@ -170,6 +183,31 @@ func (o Outbox) Validate() error {
 	return nil
 }
 
+func (w Worker) Validate() error {
+	if w.BatchSize < 1 || w.BatchSize > 1000 {
+		return fmt.Errorf("worker.batch_size must be within [1,1000], got %d", w.BatchSize)
+	}
+	if w.Interval.Duration < 10*time.Millisecond {
+		return fmt.Errorf("worker.interval must be at least 10ms, got %s", w.Interval)
+	}
+	if w.Lease.Duration < time.Second {
+		return fmt.Errorf("worker.lease must be at least 1s, got %s", w.Lease)
+	}
+	if w.HeartbeatEvery.Duration < 10*time.Millisecond {
+		return fmt.Errorf("worker.heartbeat_every must be at least 10ms, got %s", w.HeartbeatEvery)
+	}
+	if w.Lease.Duration < 3*w.HeartbeatEvery.Duration {
+		return fmt.Errorf("worker.lease %s must be at least three times worker.heartbeat_every %s so two missed beats never expire a live worker", w.Lease, w.HeartbeatEvery)
+	}
+	if w.CleanupTimeout.Duration < 100*time.Millisecond {
+		return fmt.Errorf("worker.cleanup_timeout must be at least 100ms, got %s", w.CleanupTimeout)
+	}
+	if w.Concurrency < 1 || w.Concurrency > 64 {
+		return fmt.Errorf("worker.concurrency must be within [1,64], got %d", w.Concurrency)
+	}
+	return nil
+}
+
 type Log struct {
 	Level  LogLevel  `yaml:"level"`
 	Format LogFormat `yaml:"format"`
@@ -183,6 +221,7 @@ type Config struct {
 	SCM          SCM          `yaml:"scm"`
 	Policy       Policy       `yaml:"policy"`
 	Outbox       Outbox       `yaml:"outbox"`
+	Worker       Worker       `yaml:"worker"`
 	Log          Log          `yaml:"log"`
 }
 
@@ -230,6 +269,14 @@ func Defaults() Config {
 			Lease:            Duration{30 * time.Second},
 			MaxAttempts:      5,
 			RetryBackoffBase: Duration{500 * time.Millisecond},
+		},
+		Worker: Worker{
+			BatchSize:      8,
+			Interval:       Duration{250 * time.Millisecond},
+			Lease:          Duration{30 * time.Second},
+			HeartbeatEvery: Duration{5 * time.Second},
+			CleanupTimeout: Duration{10 * time.Second},
+			Concurrency:    4,
 		},
 		Log: Log{
 			Level:  LogInfo,
@@ -290,6 +337,9 @@ func (c Config) Validate() error {
 		return fmt.Errorf("scm.driver %q is not supported", c.SCM.Driver)
 	}
 	if err := c.Outbox.Validate(); err != nil {
+		return err
+	}
+	if err := c.Worker.Validate(); err != nil {
 		return err
 	}
 	switch c.Log.Level {
@@ -443,6 +493,24 @@ func (c *Config) ApplyEnv(lookup LookupFunc) error {
 	if err := durVar(envOutboxBackoff, &c.Outbox.RetryBackoffBase); err != nil {
 		return err
 	}
+	if err := intVar(envWorkerBatchSize, &c.Worker.BatchSize); err != nil {
+		return err
+	}
+	if err := durVar(envWorkerInterval, &c.Worker.Interval); err != nil {
+		return err
+	}
+	if err := durVar(envWorkerLease, &c.Worker.Lease); err != nil {
+		return err
+	}
+	if err := durVar(envWorkerHeartbeat, &c.Worker.HeartbeatEvery); err != nil {
+		return err
+	}
+	if err := durVar(envWorkerCleanup, &c.Worker.CleanupTimeout); err != nil {
+		return err
+	}
+	if err := intVar(envWorkerConcurrency, &c.Worker.Concurrency); err != nil {
+		return err
+	}
 	level := string(c.Log.Level)
 	if err := str(envLogLevel, &level); err != nil {
 		return err
@@ -484,6 +552,12 @@ const (
 	envOutboxLease        = "ANTS_OUTBOX_LEASE"
 	envOutboxMaxAttempts  = "ANTS_OUTBOX_MAX_ATTEMPTS"
 	envOutboxBackoff      = "ANTS_OUTBOX_RETRY_BACKOFF_BASE"
+	envWorkerBatchSize    = "ANTS_WORKER_BATCH_SIZE"
+	envWorkerInterval     = "ANTS_WORKER_INTERVAL"
+	envWorkerLease        = "ANTS_WORKER_LEASE"
+	envWorkerHeartbeat    = "ANTS_WORKER_HEARTBEAT_EVERY"
+	envWorkerCleanup      = "ANTS_WORKER_CLEANUP_TIMEOUT"
+	envWorkerConcurrency  = "ANTS_WORKER_CONCURRENCY"
 	envLogLevel           = "ANTS_LOG_LEVEL"
 	envLogFormat          = "ANTS_LOG_FORMAT"
 )
@@ -499,6 +573,8 @@ var knownEnvVars = map[string]bool{
 	envPolicyAllowCommits: true, envLogLevel: true, envLogFormat: true,
 	envOutboxBatchSize: true, envOutboxInterval: true, envOutboxLease: true,
 	envOutboxMaxAttempts: true, envOutboxBackoff: true,
+	envWorkerBatchSize: true, envWorkerInterval: true, envWorkerLease: true,
+	envWorkerHeartbeat: true, envWorkerCleanup: true, envWorkerConcurrency: true,
 }
 
 // unknownAntsVars scans the process environment so a mistyped override fails

@@ -9,7 +9,6 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
-	"sync"
 	"time"
 
 	"github.com/metaforismo/ants/internal/config"
@@ -84,8 +83,7 @@ type Server struct {
 	log    *slog.Logger
 	clock  ports.Clock
 
-	runWG sync.WaitGroup
-	http  *http.Server
+	http *http.Server
 }
 
 type Deps struct {
@@ -253,18 +251,9 @@ func (s *Server) Start() error {
 	return err
 }
 
-// Shutdown drains HTTP connections and waits for in-flight run workers.
+// Shutdown drains HTTP connections. Run execution is owned by the
+// process-level worker (ADR-0012 part 2), so no background work remains tied
+// to requests and nothing but the HTTP server itself needs draining here.
 func (s *Server) Shutdown(ctx context.Context) error {
-	shutdownErr := s.http.Shutdown(ctx)
-	done := make(chan struct{})
-	go func() {
-		s.runWG.Wait()
-		close(done)
-	}()
-	select {
-	case <-done:
-	case <-ctx.Done():
-		return fmt.Errorf("server: run workers did not drain: %w", ctx.Err())
-	}
-	return shutdownErr
+	return s.http.Shutdown(ctx)
 }

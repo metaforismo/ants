@@ -4,6 +4,7 @@ package cli
 
 import (
 	"context"
+	"errors"
 	"flag"
 	"fmt"
 	"io"
@@ -173,26 +174,74 @@ func RunServe(args []string, stdout, stderr io.Writer) int {
 			application.Logger.Error("outbox dispatcher stopped unexpectedly", "error", err.Error())
 		}
 	}()
-	defer func() {
-		stopDispatch()
-		<-dispatchDone
+
+	// Own run execution until shutdown (ADR-0012 part 2): claims durable
+	// work and drives it through the engine independent of HTTP request
+	// lifecycles. Stopped before the dispatcher so its final terminal writes
+	// have their events drained by the last outbox round.
+	workerCtx, stopWorker := context.WithCancel(context.Background())
+	workerDone := make(chan struct{})
+	go func() {
+		defer close(workerDone)
+		if err := application.Worker.Run(workerCtx); err != nil && workerCtx.Err() == nil {
+			application.Logger.Error("run worker stopped unexpectedly", "error", err.Error())
+		}
 	}()
 
+	serverFailed := false
 	select {
 	case err := <-serverErr:
 		if err != nil {
 			fmt.Fprintf(stderr, "server error: %v\n", err)
-			return exitFailure
+			serverFailed = true
 		}
-		return exitOK
 	case <-ctx.Done():
 		application.Logger.Info("shutdown requested")
 	}
 
-	shutdownCtx, cancel := context.WithTimeout(context.Background(), application.Config.Server.ShutdownTimeout.Duration)
-	defer cancel()
-	if err := srv.Shutdown(shutdownCtx); err != nil {
-		fmt.Fprintf(stderr, "graceful shutdown failed: %v\n", err)
+	// Graceful shutdown sequence: stop accepting requests, stop claiming and
+	// let active executions unwind (their terminal persistence runs detached
+	// from cancellation and bounded by cleanup_timeout), then give the
+	// outbox one last chance to deliver the events those writes emitted.
+	// One operator-tuned budget (server.shutdown_timeout) covers all phases;
+	// exhausting it names the phase that did not finish instead of waiting
+	// unboundedly — anything left behind converges through lease expiry and
+	// recovery, never silent loss.
+	drainCtx, cancelDrain := context.WithTimeout(
+		context.Background(), application.Config.Server.ShutdownTimeout.Duration)
+	defer cancelDrain()
+
+	var drainErr error
+	if err := srv.Shutdown(drainCtx); err != nil {
+		drainErr = errors.Join(drainErr, fmt.Errorf("http server: %w", err))
+	}
+	stopWorker()
+	workerDrained := true
+	select {
+	case <-workerDone:
+	case <-drainCtx.Done():
+		workerDrained = false
+		drainErr = errors.Join(drainErr, fmt.Errorf("run worker did not drain within the shutdown budget"))
+	}
+	// The outbox gets whatever shutdown budget remains. If earlier phases
+	// already exhausted it, say exactly that instead of reporting a failed
+	// final round that was never attempted: delivery is at-least-once, so
+	// whatever is left simply resumes on the next start.
+	stopDispatch()
+	select {
+	case <-dispatchDone:
+	case <-drainCtx.Done():
+		if !workerDrained {
+			drainErr = errors.Join(drainErr, fmt.Errorf("shutdown budget exhausted before a final outbox drain could be attempted"))
+		} else {
+			drainErr = errors.Join(drainErr, fmt.Errorf("outbox dispatcher did not finish its final drain within the shutdown budget"))
+		}
+	}
+	if drainErr != nil {
+		fmt.Fprintf(stderr, "graceful shutdown failed: %v\n", drainErr)
+		return exitFailure
+	}
+	if serverFailed {
 		return exitFailure
 	}
 	return exitOK

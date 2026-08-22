@@ -21,10 +21,11 @@ import (
 )
 
 type env struct {
-	t        *testing.T
-	baseURL  string
-	tenantAS string // slug of primary tenant
-	tenantBS string // slug of isolation-check tenant
+	t           *testing.T
+	baseURL     string
+	tenantAS    string // slug of primary tenant
+	tenantBS    string // slug of isolation-check tenant
+	application *app.App
 }
 
 var suffixMu sync.Mutex
@@ -78,12 +79,27 @@ func buildApp(t *testing.T, cfg config.Config) *app.App {
 
 func newEnv(t *testing.T) *env {
 	t.Helper()
+	return newEnvWithRuntime(t, true)
+}
+
+// newEnvWithoutRuntime builds the API without the process-level execution
+// stack, pinning the contract that StartRun only enqueues (ADR-0012 part 2).
+func newEnvWithoutRuntime(t *testing.T) *env {
+	t.Helper()
+	return newEnvWithRuntime(t, false)
+}
+
+func newEnvWithRuntime(t *testing.T, withRuntime bool) *env {
+	t.Helper()
 	cfg := config.Defaults()
 	cfg.Server.DevHeaderAuth = true
 	application := buildApp(t, cfg)
 	ts := buildServer(t, cfg, application)
+	if withRuntime {
+		startRuntime(t, application)
+	}
 
-	e := &env{t: t, baseURL: ts.URL}
+	e := &env{t: t, baseURL: ts.URL, application: application}
 	var created map[string]any
 	e.doJSON(t, http.MethodPost, "/v1/tenants", "",
 		map[string]any{"slug": "acme-" + uniqueSuffix(), "name": "Acme"}, &created, 0)
@@ -93,6 +109,29 @@ func newEnv(t *testing.T) *env {
 		map[string]any{"slug": "other-" + uniqueSuffix(), "name": "Other"}, &created, 0)
 	e.tenantBS = created["slug"].(string)
 	return e
+}
+
+// startRuntime runs the run worker and the outbox dispatcher next to the
+// HTTP server exactly as `ants serve` does (ADR-0012 part 2), so API tests
+// exercise the durable execution path instead of request-scoped work.
+func startRuntime(t *testing.T, application *app.App) {
+	t.Helper()
+	ctx, stop := context.WithCancel(context.Background())
+	workerDone := make(chan struct{})
+	go func() {
+		defer close(workerDone)
+		_ = application.Worker.Run(ctx)
+	}()
+	dispatchDone := make(chan struct{})
+	go func() {
+		defer close(dispatchDone)
+		_ = application.Outbox.Run(ctx)
+	}()
+	t.Cleanup(func() {
+		stop()
+		<-workerDone
+		<-dispatchDone
+	})
 }
 
 func (e *env) headers(tenantSlug string) map[string]string {

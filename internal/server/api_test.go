@@ -1,14 +1,56 @@
 package server_test
 
 import (
+	"context"
 	"encoding/json"
 	"net/http"
 	"strings"
 	"testing"
 
 	"github.com/metaforismo/ants/internal/config"
+	"github.com/metaforismo/ants/internal/domain"
 	"github.com/metaforismo/ants/internal/fixtures"
 )
+
+// TestStartRunOnlyEnqueues pins the ADR-0012 part 2 lifecycle contract: the
+// start-run endpoint returns 202 after durably enqueueing the run and its
+// runnable claim, and never spawns execution tied to the request.
+func TestStartRunOnlyEnqueues(t *testing.T) {
+	e := newEnvWithoutRuntime(t)
+	_, threadID := e.seedProjectThread(e.tenantAS)
+	runID := e.startRun(t, threadID)
+
+	view := e.getRun(t, runID)
+	if view.Run.Status != "pending" {
+		t.Fatalf("run must stay pending until a worker claims it, got %s", view.Run.Status)
+	}
+
+	ctx := context.Background()
+	tenant, err := e.application.Repos.Tenants.GetBySlug(ctx, e.tenantAS)
+	if err != nil {
+		t.Fatal(err)
+	}
+	claim, err := e.application.Repos.RunClaims.Get(ctx, tenant.ID, domain.RunID(runID))
+	if err != nil {
+		t.Fatalf("start must create exactly one durable claim: %v", err)
+	}
+	if claim.Status != domain.ClaimRunnable || claim.Owner != "" {
+		t.Fatalf("claim must be untouched runnable work, got %+v", claim)
+	}
+}
+
+func (e *env) getRun(t *testing.T, runID string) runView {
+	t.Helper()
+	status, _, raw := e.do(http.MethodGet, "/v1/runs/"+runID, e.headers(e.tenantAS), "")
+	if status != http.StatusOK {
+		t.Fatalf("get run: status %d body %s", status, raw)
+	}
+	var view runView
+	if err := json.Unmarshal(raw, &view); err != nil {
+		t.Fatal(err)
+	}
+	return view
+}
 
 func TestFullPipelineThroughAPI(t *testing.T) {
 	e := newEnv(t)

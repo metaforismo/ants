@@ -60,6 +60,22 @@ policy:
   # no configuration flag to re-enable them in this release.
   allow_local_commits: true
 
+worker:
+  # The process-level run executor (ADR-0012 part 2). It claims durable run
+  # claims in bounded batches and drives them through the engine; batch_size
+  # and concurrency cap one round and simultaneous executions respectively.
+  batch_size: 8
+  interval: 250ms
+  # Claim lease renewed by heartbeat_every; the lease must be at least three
+  # times the heartbeat interval so two missed beats never expire a live
+  # worker, and a crashed worker's runs become reclaimable after one lease.
+  lease: 30s
+  heartbeat_every: 5s
+  # Bounds terminal persistence after execution ends; it deliberately runs
+  # detached from shutdown cancellation so final states always land.
+  cleanup_timeout: 10s
+  concurrency: 4
+
 log:
   level: info
   format: text
