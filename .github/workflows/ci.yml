@@ -1,0 +1,85 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  go:
+    name: Go build, lint, tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Format check
+        run: |
+          out=$(gofmt -l .)
+          if [ -n "$out" ]; then echo "unformatted files:"; echo "$out"; exit 1; fi
+
+      - name: Vet
+        run: go vet ./...
+
+      - name: Staticcheck (pinned)
+        run: go run honnef.co/go/tools/cmd/staticcheck@2026.2.1 ./...
+
+      - name: Tidy check
+        run: |
+          go mod tidy
+          git diff --exit-code -- go.mod go.sum
+
+      - name: Manifest check
+        run: go run ./scripts/manifestcheck
+
+      - name: Unit and contract tests
+        run: go test ./...
+
+      - name: Race detector
+        run: go test -race ./...
+
+      - name: Build binaries
+        run: |
+          go build -o bin/ants ./cmd/ants
+          go build -o bin/ants-api ./cmd/api
+
+      - name: Deterministic pipeline smoke test (scripted drivers)
+        run: ./bin/ants demo run --scm memory --sandbox fake
+
+      - name: Real-execution pipeline smoke test (local git)
+        run: ./bin/ants demo run
+
+  contracts:
+    name: TypeScript contracts
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10.28.0
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+          cache-dependency-path: pnpm-lock.yaml
+
+      - name: Install
+        run: pnpm install --frozen-lockfile
+
+      - name: Generate types from the OpenAPI spec
+        run: pnpm --filter @ants/contracts generate
+
+      - name: Fail on stale generated output
+        run: git diff --exit-code -- packages/contracts/src/schema.d.ts
+
+      - name: Test contracts package
+        run: pnpm --filter @ants/contracts test

@@ -1,0 +1,473 @@
+package server
+
+import (
+	"context"
+	"errors"
+	"net/http"
+	"strconv"
+	"strings"
+	"time"
+
+	"github.com/metaforismo/ants/internal/domain"
+	"github.com/metaforismo/ants/internal/orchestration"
+)
+
+// ---- tenants ----
+
+type createTenantRequest struct {
+	Slug   string `json:"slug"`
+	Name   string `json:"name"`
+	Region string `json:"region,omitempty"`
+}
+
+func (s *Server) handleCreateTenant(w http.ResponseWriter, r *http.Request) {
+	var req createTenantRequest
+	if err := decodeStrict(r, &req); err != nil {
+		writeProblem(w, r, asDomainError(err))
+		return
+	}
+	idStr, err := domain.NewID(domain.PrefixTenant)
+	if err != nil {
+		writeInternal(w, r, err)
+		return
+	}
+	tenant, terr := domain.NewTenant(domain.TenantID(idStr), req.Slug, req.Name, domain.PlanFree, req.Region, s.now())
+	if terr != nil {
+		writeProblem(w, r, asDomainError(terr))
+		return
+	}
+	if cerr := s.repos.Tenants.Create(r.Context(), tenant); cerr != nil {
+		writeProblem(w, r, asDomainError(cerr))
+		return
+	}
+	s.emitTenantEvent(r.Context(), tenant)
+	writeJSON(w, http.StatusCreated, tenant)
+}
+
+// ---- projects ----
+
+type createProjectRequest struct {
+	Slug          string `json:"slug"`
+	Name          string `json:"name"`
+	DefaultBranch string `json:"default_branch"`
+	SeedName      string `json:"seed_name"`
+}
+
+func (s *Server) handleCreateProject(w http.ResponseWriter, r *http.Request) {
+	p := mustPrincipal(w, r)
+	if p == nil {
+		return
+	}
+	var req createProjectRequest
+	if err := decodeStrict(r, &req); err != nil {
+		writeProblem(w, r, asDomainError(err))
+		return
+	}
+	idStr, err := domain.NewID(domain.PrefixProject)
+	if err != nil {
+		writeInternal(w, r, err)
+		return
+	}
+	project, perr := domain.NewProject(domain.ProjectID(idStr), p.TenantID, req.Slug, req.Name, req.DefaultBranch, req.SeedName, s.now())
+	if perr != nil {
+		writeProblem(w, r, asDomainError(perr))
+		return
+	}
+	if cerr := s.repos.Projects.Create(r.Context(), project); cerr != nil {
+		writeProblem(w, r, asDomainError(cerr))
+		return
+	}
+	writeJSON(w, http.StatusCreated, project)
+}
+
+func (s *Server) handleListProjects(w http.ResponseWriter, r *http.Request) {
+	p := mustPrincipal(w, r)
+	if p == nil {
+		return
+	}
+	projects, err := s.repos.Projects.ListByTenant(r.Context(), p.TenantID)
+	if err != nil {
+		writeProblem(w, r, asDomainError(err))
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"projects": projects})
+}
+
+// ---- threads and messages ----
+
+type createThreadRequest struct {
+	ProjectID string `json:"project_id"`
+	Title     string `json:"title"`
+}
+
+func (s *Server) handleCreateThread(w http.ResponseWriter, r *http.Request) {
+	p := mustPrincipal(w, r)
+	if p == nil {
+		return
+	}
+	var req createThreadRequest
+	if err := decodeStrict(r, &req); err != nil {
+		writeProblem(w, r, asDomainError(err))
+		return
+	}
+	projectID, err := domain.ParseProjectID(req.ProjectID)
+	if err != nil {
+		writeProblem(w, r, asDomainError(err))
+		return
+	}
+	if _, err := s.repos.Projects.Get(r.Context(), p.TenantID, projectID); err != nil {
+		writeProblem(w, r, asDomainError(err))
+		return
+	}
+	idStr, idErr := domain.NewID(domain.PrefixThread)
+	if idErr != nil {
+		writeInternal(w, r, idErr)
+		return
+	}
+	thread, terr := domain.NewThread(domain.ThreadID(idStr), p.TenantID, projectID, req.Title, p.ID, s.now())
+	if terr != nil {
+		writeProblem(w, r, asDomainError(terr))
+		return
+	}
+	if cerr := s.repos.Threads.Create(r.Context(), thread); cerr != nil {
+		writeProblem(w, r, asDomainError(cerr))
+		return
+	}
+	writeJSON(w, http.StatusCreated, thread)
+}
+
+func (s *Server) handleGetThread(w http.ResponseWriter, r *http.Request) {
+	p := mustPrincipal(w, r)
+	if p == nil {
+		return
+	}
+	threadID, err := domain.ParseThreadID(r.PathValue("id"))
+	if err != nil {
+		writeProblem(w, r, asDomainError(err))
+		return
+	}
+	thread, getErr := s.repos.Threads.Get(r.Context(), p.TenantID, threadID)
+	if getErr != nil {
+		writeProblem(w, r, asDomainError(getErr))
+		return
+	}
+	writeJSON(w, http.StatusOK, thread)
+}
+
+type appendMessageRequest struct {
+	Content string `json:"content"`
+}
+
+func (s *Server) handleAppendMessage(w http.ResponseWriter, r *http.Request) {
+	p := mustPrincipal(w, r)
+	if p == nil {
+		return
+	}
+	threadID, err := domain.ParseThreadID(r.PathValue("id"))
+	if err != nil {
+		writeProblem(w, r, asDomainError(err))
+		return
+	}
+	if _, err := s.repos.Threads.Get(r.Context(), p.TenantID, threadID); err != nil {
+		writeProblem(w, r, asDomainError(err))
+		return
+	}
+	var req appendMessageRequest
+	if err := decodeStrict(r, &req); err != nil {
+		writeProblem(w, r, asDomainError(err))
+		return
+	}
+	idStr, idErr := domain.NewID(domain.PrefixMessage)
+	if idErr != nil {
+		writeInternal(w, r, idErr)
+		return
+	}
+	msg := &domain.Message{
+		ID:           domain.MessageID(idStr),
+		TenantID:     p.TenantID,
+		ThreadID:     threadID,
+		Role:         domain.RoleUser,
+		DeliveryMode: domain.DeliveryImmediate,
+		Content:      req.Content,
+	}
+	if verr := msg.Validate(); verr != nil {
+		writeProblem(w, r, asDomainError(verr))
+		return
+	}
+	if aerr := s.repos.Threads.AppendMessage(r.Context(), msg); aerr != nil {
+		writeProblem(w, r, asDomainError(aerr))
+		return
+	}
+	writeJSON(w, http.StatusCreated, msg)
+}
+
+func (s *Server) handleListMessages(w http.ResponseWriter, r *http.Request) {
+	p := mustPrincipal(w, r)
+	if p == nil {
+		return
+	}
+	threadID, err := domain.ParseThreadID(r.PathValue("id"))
+	if err != nil {
+		writeProblem(w, r, asDomainError(err))
+		return
+	}
+	messages, total, listErr := s.repos.Threads.Messages(r.Context(), p.TenantID, threadID, queryInt64(r, "after"), defaultPageLimit)
+	if listErr != nil {
+		writeProblem(w, r, asDomainError(listErr))
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"messages": messages, "total": total})
+}
+
+// ---- runs ----
+
+func (s *Server) handleStartRun(w http.ResponseWriter, r *http.Request) {
+	p := mustPrincipal(w, r)
+	if p == nil {
+		return
+	}
+	threadID, err := domain.ParseThreadID(r.PathValue("id"))
+	if err != nil {
+		writeProblem(w, r, asDomainError(err))
+		return
+	}
+	key := strings.TrimSpace(r.Header.Get("Idempotency-Key"))
+	if key == "" {
+		writeProblem(w, r, domain.Invalidf("idempotency_key_required", "the Idempotency-Key header is required to start a run"))
+		return
+	}
+	if len(key) > domain.MaxIdempotencyKeyLen {
+		writeProblem(w, r, domain.Invalidf("idempotency_key_too_long", "idempotency key exceeds %d characters", domain.MaxIdempotencyKeyLen))
+		return
+	}
+
+	result, startErr := s.engine.StartRun(r.Context(), orchestration.StartInput{
+		TenantID:       p.TenantID,
+		ThreadID:       threadID,
+		Principal:      p.ID,
+		Actor:          domain.Actor{Type: domain.PrincipalHuman, ID: string(p.ID)},
+		IdempotencyKey: key,
+	})
+	if startErr != nil {
+		writeProblem(w, r, asDomainError(startErr))
+		return
+	}
+	if !result.Replayed {
+		s.launchRunWorker(r, result.Run.ID, p.TenantID)
+	}
+	writeJSONStatus(w, http.StatusAccepted, result.Run)
+}
+
+// launchRunWorker detaches execution from the request lifecycle while keeping
+// the server's drain guarantee through runWG.
+func (s *Server) launchRunWorker(r *http.Request, runID domain.RunID, tenantID domain.TenantID) {
+	s.runWG.Add(1)
+	go func() {
+		defer s.runWG.Done()
+		ctx, cancel := context.WithTimeout(context.WithoutCancel(r.Context()), time.Duration(s.cfg.Orchestrator.StageTimeout.Duration)*4)
+		defer cancel()
+		if execErr := s.engine.Execute(ctx, tenantID, runID); execErr != nil && !errors.Is(execErr, context.Canceled) {
+			s.log.Error("run execution failed", "run_id", string(runID), "error", safeLogError(execErr))
+		} else {
+			s.log.Info("run execution finished", "run_id", string(runID))
+		}
+	}()
+}
+
+func (s *Server) handleGetRun(w http.ResponseWriter, r *http.Request) {
+	p := mustPrincipal(w, r)
+	if p == nil {
+		return
+	}
+	runID, err := domain.ParseRunID(r.PathValue("id"))
+	if err != nil {
+		writeProblem(w, r, asDomainError(err))
+		return
+	}
+	run, getErr := s.repos.Runs.Get(r.Context(), p.TenantID, runID)
+	if getErr != nil {
+		writeProblem(w, r, asDomainError(getErr))
+		return
+	}
+	tasks, _ := s.repos.Tasks.ListByRun(r.Context(), p.TenantID, runID)
+	writeJSON(w, http.StatusOK, map[string]any{"run": run, "tasks": tasks})
+}
+
+func (s *Server) handleRunEvents(w http.ResponseWriter, r *http.Request) {
+	p := mustPrincipal(w, r)
+	if p == nil {
+		return
+	}
+	runID, err := domain.ParseRunID(r.PathValue("id"))
+	if err != nil {
+		writeProblem(w, r, asDomainError(err))
+		return
+	}
+	if _, getErr := s.repos.Runs.Get(r.Context(), p.TenantID, runID); getErr != nil {
+		writeProblem(w, r, asDomainError(getErr))
+		return
+	}
+	events, listErr := s.repos.Events.ListByRun(r.Context(), p.TenantID, runID, queryInt64(r, "after"), defaultPageLimit)
+	if listErr != nil {
+		writeProblem(w, r, asDomainError(listErr))
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"events": events})
+}
+
+func (s *Server) handleCancelRun(w http.ResponseWriter, r *http.Request) {
+	p := mustPrincipal(w, r)
+	if p == nil {
+		return
+	}
+	runID, err := domain.ParseRunID(r.PathValue("id"))
+	if err != nil {
+		writeProblem(w, r, asDomainError(err))
+		return
+	}
+	if cancelErr := s.engine.Cancel(r.Context(), p.TenantID, runID); cancelErr != nil {
+		writeProblem(w, r, asDomainError(cancelErr))
+		return
+	}
+	writeJSON(w, http.StatusAccepted, map[string]string{"status": "cancelling"})
+}
+
+func (s *Server) handleRunReport(w http.ResponseWriter, r *http.Request) {
+	p := mustPrincipal(w, r)
+	if p == nil {
+		return
+	}
+	runID, err := domain.ParseRunID(r.PathValue("id"))
+	if err != nil {
+		writeProblem(w, r, asDomainError(err))
+		return
+	}
+	run, getErr := s.repos.Runs.Get(r.Context(), p.TenantID, runID)
+	if getErr != nil {
+		writeProblem(w, r, asDomainError(getErr))
+		return
+	}
+	if !run.Status.Terminal() || run.Report == nil {
+		writeProblem(w, r, domain.Conflictf("report_not_ready", "report becomes available once the run finishes (current state: %s)", run.Status))
+		return
+	}
+	writeJSON(w, http.StatusOK, run.Report)
+}
+
+// ---- tasks and artifacts ----
+
+func (s *Server) handleGetTask(w http.ResponseWriter, r *http.Request) {
+	p := mustPrincipal(w, r)
+	if p == nil {
+		return
+	}
+	taskID, err := domain.ParseTaskID(r.PathValue("id"))
+	if err != nil {
+		writeProblem(w, r, asDomainError(err))
+		return
+	}
+	task, getErr := s.repos.Tasks.Get(r.Context(), p.TenantID, taskID)
+	if getErr != nil {
+		writeProblem(w, r, asDomainError(getErr))
+		return
+	}
+	writeJSON(w, http.StatusOK, task)
+}
+
+func (s *Server) handleGetArtifact(w http.ResponseWriter, r *http.Request) {
+	p := mustPrincipal(w, r)
+	if p == nil {
+		return
+	}
+	artifactID, err := domain.ParseArtifactID(r.PathValue("id"))
+	if err != nil {
+		writeProblem(w, r, asDomainError(err))
+		return
+	}
+	artifact, getErr := s.repos.Artifacts.Get(r.Context(), p.TenantID, artifactID)
+	if getErr != nil {
+		writeProblem(w, r, asDomainError(getErr))
+		return
+	}
+	contentType := "text/plain; charset=utf-8"
+	switch artifact.Kind {
+	case domain.ArtifactReport:
+		contentType = "application/json; charset=utf-8"
+	case domain.ArtifactDiff:
+		contentType = "text/x-diff; charset=utf-8"
+	}
+	w.Header().Set("Content-Type", contentType)
+	w.Header().Set("X-Ants-Digest", artifact.Digest)
+	w.Header().Set("X-Ants-Retention", string(artifact.Retention))
+	w.WriteHeader(http.StatusOK)
+	_, _ = w.Write(artifact.Content)
+}
+
+// ---- shared helpers ----
+
+const defaultPageLimit = 200
+
+func queryInt64(r *http.Request, name string) int64 {
+	raw := r.URL.Query().Get(name)
+	if raw == "" {
+		return 0
+	}
+	v, err := strconv.ParseInt(raw, 10, 64)
+	if err != nil || v < 0 {
+		return 0
+	}
+	return v
+}
+
+func (s *Server) emitTenantEvent(ctx context.Context, tenant *domain.Tenant) {
+	id, err := domain.NewID(domain.PrefixEvent)
+	if err != nil {
+		s.log.Error("event id generation failed", "error", safeLogError(err))
+		return
+	}
+	evt := &domain.Event{
+		ID:            domain.EventID(id),
+		Type:          domain.EventTenantCreated,
+		OccurredAt:    s.now(),
+		TenantID:      tenant.ID,
+		AggregateType: "tenant",
+		AggregateID:   string(tenant.ID),
+		Data: map[string]any{
+			"slug": tenant.Slug,
+			"plan": string(tenant.Plan),
+		},
+	}
+	if err := s.repos.Events.Append(ctx, evt); err != nil {
+		s.log.Error("tenant event append failed", "error", safeLogError(err))
+	}
+}
+
+func writeInternal(w http.ResponseWriter, r *http.Request, err error) {
+	writeProblem(w, r, domain.Internalf(err, "internal", "unexpected server error"))
+}
+
+func mustPrincipal(w http.ResponseWriter, r *http.Request) *Principal {
+	p, err := principalFrom(r.Context())
+	if err != nil {
+		writeProblem(w, r, &domain.Error{Kind: domain.ErrKindUnauthorized, Code: "no_principal", Message: "authentication required"})
+		return nil
+	}
+	return p
+}
+
+func asDomainError(err error) *domain.Error {
+	var dom *domain.Error
+	if errors.As(err, &dom) {
+		return dom
+	}
+	return domain.Internalf(err, "internal", "%v", err)
+}
+
+func safeLogError(err error) string {
+	const max = 512
+	msg := err.Error()
+	if len(msg) > max {
+		return msg[:max]
+	}
+	return msg
+}

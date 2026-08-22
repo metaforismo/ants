@@ -1,0 +1,15 @@
+{
+  "name": "@ants/contracts",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Generated TypeScript types for the Ants public API. Source of truth: openapi/v1/openapi.yaml - edit the spec, never this output.",
+  "type": "module",
+  "main": "./src/index.ts",
+  "scripts": {
+    "generate": "openapi-typescript ../../openapi/v1/openapi.yaml -o ./src/schema.d.ts",
+    "test": "node --test test/*.test.mjs"
+  },
+  "devDependencies": {
+    "openapi-typescript": "7.13.0"
+  }
+}

@@ -1,0 +1,858 @@
+openapi: 3.0.3
+info:
+  title: Ants API
+  version: 1.0.0
+  description: |
+    Public HTTP API for the Ants software-engineering agent platform,
+    versioned under `/v1`.
+
+    Contract rules carried over from the master plan:
+    - Every remotely retryable mutation requires an `Idempotency-Key`.
+    - Errors use RFC 9457 Problem Details (`application/problem+json`)
+      with a stable `code` extension field.
+    - Event streams are paginated by a monotonic `seq` cursor; clients
+      pass `after=<last seen seq>` to resume without duplicates.
+    - Tenant scoping is implicit and mandatory: every authenticated
+      request operates inside exactly one tenant.
+
+    Authentication: production deployments authenticate via OIDC at the
+    edge (Horizon 1 work). This tranche additionally defines the explicit
+    development-only header pair `X-Ants-Dev-Tenant` /
+    `X-Ants-Dev-Principal`; servers refuse every request with problem code
+    `authentication_not_configured` unless dev auth is enabled on purpose.
+servers:
+  - url: http://127.0.0.1:8080
+    description: Local development default
+tags:
+  - name: system
+  - name: tenants
+  - name: projects
+  - name: threads
+  - name: runs
+  - name: tasks
+  - name: artifacts
+
+paths:
+  /healthz:
+    get:
+      tags: [system]
+      summary: Liveness probe
+      operationId: getHealthz
+      responses:
+        "200":
+          description: Process is up
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Health"
+
+  /readyz:
+    get:
+      tags: [system]
+      summary: Readiness probe (checks persistence)
+      operationId: getReadyz
+      responses:
+        "200":
+          description: Ready
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Health"
+        "503":
+          $ref: "#/components/responses/Problem"
+
+  /v1/tenants:
+    post:
+      tags: [tenants]
+      summary: Create a tenant
+      operationId: createTenant
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CreateTenantRequest"
+      responses:
+        "201":
+          description: Tenant created
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Tenant"
+        "400":
+          $ref: "#/components/responses/Problem"
+        "409":
+          $ref: "#/components/responses/Problem"
+
+  /v1/projects:
+    get:
+      tags: [projects]
+      summary: List projects of the authenticated tenant
+      operationId: listProjects
+      security: [{ devHeader: [] }]
+      responses:
+        "200":
+          description: Projects (possibly empty)
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ProjectList"
+        "401":
+          $ref: "#/components/responses/Problem"
+    post:
+      tags: [projects]
+      summary: Create a project
+      operationId: createProject
+      security: [{ devHeader: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CreateProjectRequest"
+      responses:
+        "201":
+          description: Project created
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Project"
+        "400":
+          $ref: "#/components/responses/Problem"
+        "401":
+          $ref: "#/components/responses/Problem"
+
+  /v1/threads:
+    post:
+      tags: [threads]
+      summary: Open a thread on a project
+      operationId: createThread
+      security: [{ devHeader: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CreateThreadRequest"
+      responses:
+        "201":
+          description: Thread created in `idle` state
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Thread"
+        "400":
+          $ref: "#/components/responses/Problem"
+        "401":
+          $ref: "#/components/responses/Problem"
+        "404":
+          $ref: "#/components/responses/Problem"
+
+  /v1/threads/{id}:
+    get:
+      tags: [threads]
+      summary: Fetch one thread
+      operationId: getThread
+      security: [{ devHeader: [] }]
+      parameters:
+        - $ref: "#/components/parameters/ThreadID"
+      responses:
+        "200":
+          description: The thread
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Thread"
+        "401":
+          $ref: "#/components/responses/Problem"
+        "404":
+          $ref: "#/components/responses/Problem"
+
+  /v1/threads/{id}/messages:
+    post:
+      tags: [threads]
+      summary: Append a user message (the run request)
+      operationId: appendThreadMessage
+      security: [{ devHeader: [] }]
+      parameters:
+        - $ref: "#/components/parameters/ThreadID"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/AppendMessageRequest"
+      responses:
+        "201":
+          description: Message stored; sequence assigned by the server
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Message"
+        "400":
+          $ref: "#/components/responses/Problem"
+        "401":
+          $ref: "#/components/responses/Problem"
+        "404":
+          $ref: "#/components/responses/Problem"
+    get:
+      tags: [threads]
+      summary: List messages after a cursor
+      operationId: listThreadMessages
+      security: [{ devHeader: [] }]
+      parameters:
+        - $ref: "#/components/parameters/ThreadID"
+        - $ref: "#/components/parameters/AfterCursor"
+      responses:
+        "200":
+          description: Messages in ascending sequence order
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/MessagePage"
+        "401":
+          $ref: "#/components/responses/Problem"
+        "404":
+          $ref: "#/components/responses/Problem"
+
+  /v1/threads/{id}/runs:
+    post:
+      tags: [runs]
+      summary: |
+        Start a run for the thread. Requires an `Idempotency-Key`;
+        retrying the same call replays the same run instead of creating one.
+      operationId: startRun
+      security: [{ devHeader: [] }]
+      parameters:
+        - $ref: "#/components/parameters/ThreadID"
+        - name: Idempotency-Key
+          in: header
+          required: true
+          maxLength: 256
+          schema:
+            type: string
+      responses:
+        "202":
+          description: Run accepted; execution proceeds asynchronously
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Run"
+        "400":
+          $ref: "#/components/responses/Problem"
+        "401":
+          $ref: "#/components/responses/Problem"
+        "404":
+          $ref: "#/components/responses/Problem"
+
+  /v1/runs/{id}:
+    get:
+      tags: [runs]
+      summary: Fetch a run with its tasks
+      operationId: getRun
+      security: [{ devHeader: [] }]
+      parameters:
+        - $ref: "#/components/parameters/RunID"
+      responses:
+        "200":
+          description: Run detail
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/RunWithTasks"
+        "401":
+          $ref: "#/components/responses/Problem"
+        "404":
+          $ref: "#/components/responses/Problem"
+
+  /v1/runs/{id}/events:
+    get:
+      tags: [runs]
+      summary: Event stream page for the run
+      operationId: listRunEvents
+      security: [{ devHeader: [] }]
+      parameters:
+        - $ref: "#/components/parameters/RunID"
+        - $ref: "#/components/parameters/AfterCursor"
+      responses:
+        "200":
+          description: Events ordered by cursor; pass the last `seq` back as `after`
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/EventPage"
+        "401":
+          $ref: "#/components/responses/Problem"
+        "404":
+          $ref: "#/components/responses/Problem"
+
+  /v1/runs/{id}/cancel:
+    post:
+      tags: [runs]
+      summary: Request cooperative cancellation of an executing run
+      operationId: cancelRun
+      security: [{ devHeader: [] }]
+      parameters:
+        - $ref: "#/components/parameters/RunID"
+      responses:
+        "202":
+          description: Cancellation requested
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:
+                    type: string
+                required: [status]
+        "401":
+          $ref: "#/components/responses/Problem"
+        "404":
+          $ref: "#/components/responses/Problem"
+        "409":
+          $ref: "#/components/responses/Problem"
+
+  /v1/runs/{id}/report:
+    get:
+      tags: [runs]
+      summary: Evidence-based run report (available once the run is terminal)
+      operationId: getRunReport
+      security: [{ devHeader: [] }]
+      parameters:
+        - $ref: "#/components/parameters/RunID"
+      responses:
+        "200":
+          description: Report
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/RunReport"
+        "401":
+          $ref: "#/components/responses/Problem"
+        "404":
+          $ref: "#/components/responses/Problem"
+        "409":
+          $ref: "#/components/responses/Problem"
+
+  /v1/tasks/{id}:
+    get:
+      tags: [tasks]
+      summary: Fetch one task
+      operationId: getTask
+      security: [{ devHeader: [] }]
+      parameters:
+        - $ref: "#/components/parameters/TaskID"
+      responses:
+        "200":
+          description: The task
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Task"
+        "401":
+          $ref: "#/components/responses/Problem"
+        "404":
+          $ref: "#/components/responses/Problem"
+
+  /v1/artifacts/{id}:
+    get:
+      tags: [artifacts]
+      summary: Download artifact content
+      description: |
+        Returns raw bytes. `X-Ants-Digest` carries the SHA-256 content digest;
+        `X-Ants-Retention` the retention class.
+      operationId: getArtifact
+      security: [{ devHeader: [] }]
+      parameters:
+        - $ref: "#/components/parameters/ArtifactID"
+      responses:
+        "200":
+          description: Artifact content
+          headers:
+            X-Ants-Digest:
+              schema: { type: string }
+            X-Ants-Retention:
+              schema: { type: string }
+          content:
+            text/x-diff:
+              schema: { type: string }
+            application/json:
+              schema: { type: string }
+            text/plain:
+              schema: { type: string }
+        "401":
+          $ref: "#/components/responses/Problem"
+        "404":
+          $ref: "#/components/responses/Problem"
+
+components:
+  securitySchemes:
+    devHeader:
+      type: apiKey
+      in: header
+      name: X-Ants-Dev-Tenant
+      description: Development only. Paired with X-Ants-Dev-Principal.
+
+  parameters:
+    ThreadID:
+      name: id
+      in: path
+      required: true
+      schema: { $ref: "#/components/schemas/ThreadID" }
+    RunID:
+      name: id
+      in: path
+      required: true
+      schema: { $ref: "#/components/schemas/RunID" }
+    TaskID:
+      name: id
+      in: path
+      required: true
+      schema: { $ref: "#/components/schemas/TaskID" }
+    ArtifactID:
+      name: id
+      in: path
+      required: true
+      schema: { $ref: "#/components/schemas/ArtifactID" }
+    AfterCursor:
+      name: after
+      in: query
+      required: false
+      description: Return entries with cursor strictly greater than this value
+      schema:
+        type: integer
+        format: int64
+        minimum: 0
+        default: 0
+
+  responses:
+    Problem:
+      description: Error as RFC 9457 Problem Details
+      content:
+        application/problem+json:
+          schema:
+            $ref: "#/components/schemas/Problem"
+
+  schemas:
+    Health:
+      type: object
+      required: [status]
+      properties:
+        status: { type: string }
+
+    Problem:
+      type: object
+      required: [type, code, title, status]
+      properties:
+        type: { type: string, format: uri }
+        code:
+          type: string
+          description: Stable machine-readable identifier for the failure mode
+        title: { type: string }
+        status: { type: integer, minimum: 400, maximum: 599 }
+        detail: { type: string }
+        instance: { type: string }
+        extras:
+          type: object
+          additionalProperties: true
+
+    TenantID: { type: string, pattern: "^ten_[A-Za-z0-9]{20,64}$" }
+    ProjectID: { type: string, pattern: "^prj_[A-Za-z0-9]{20,64}$" }
+    ThreadID: { type: string, pattern: "^thr_[A-Za-z0-9]{20,64}$" }
+    MessageID: { type: string, pattern: "^msg_[A-Za-z0-9]{20,64}$" }
+    RunID: { type: string, pattern: "^run_[A-Za-z0-9]{20,64}$" }
+    TaskID: { type: string, pattern: "^tsk_[A-Za-z0-9]{20,64}$" }
+    SpecID: { type: string, pattern: "^spc_[A-Za-z0-9]{20,64}$" }
+    ArtifactID: { type: string, pattern: "^art_[A-Za-z0-9]{20,64}$" }
+    PrincipalID: { type: string, pattern: "^prn_[A-Za-z0-9]{20,64}$" }
+
+    TenantStatus:
+      type: string
+      enum: [active, suspended, deleted]
+    PlanTier:
+      type: string
+      enum: [free, team, enterprise]
+
+    Timestamp:
+      type: string
+      format: date-time
+
+    Tenant:
+      type: object
+      required: [id, slug, name, plan, region, status, version, created_at, updated_at]
+      properties:
+        id: { $ref: "#/components/schemas/TenantID" }
+        slug: { type: string }
+        name: { type: string }
+        plan: { $ref: "#/components/schemas/PlanTier" }
+        region: { type: string }
+        status: { $ref: "#/components/schemas/TenantStatus" }
+        version: { type: integer, format: int64 }
+        created_at: { $ref: "#/components/schemas/Timestamp" }
+        updated_at: { $ref: "#/components/schemas/Timestamp" }
+
+    CreateTenantRequest:
+      type: object
+      required: [slug, name]
+      additionalProperties: false
+      properties:
+        slug: { type: string, pattern: "^[a-z0-9][a-z0-9-]{0,62}[a-z0-9]$|^$", maxLength: 64 }
+        name: { type: string, minLength: 1 }
+        region: { type: string }
+
+    Project:
+      type: object
+      required: [id, tenant_id, slug, name, default_branch, version, created_at]
+      properties:
+        id: { $ref: "#/components/schemas/ProjectID" }
+        tenant_id: { $ref: "#/components/schemas/TenantID" }
+        slug: { type: string }
+        name: { type: string }
+        default_branch: { type: string }
+        seed_name:
+          type: string
+          description: Repository seed source used by the local pipeline
+        version: { type: integer, format: int64 }
+        created_at: { $ref: "#/components/schemas/Timestamp" }
+
+    CreateProjectRequest:
+      type: object
+      required: [slug, name, default_branch, seed_name]
+      additionalProperties: false
+      properties:
+        slug: { type: string, minLength: 1 }
+        name: { type: string, minLength: 1 }
+        default_branch: { type: string, minLength: 1 }
+        seed_name: { type: string }
+
+    ProjectList:
+      type: object
+      required: [projects]
+      properties:
+        projects:
+          type: array
+          items: { $ref: "#/components/schemas/Project" }
+
+    ThreadStatus:
+      type: string
+      description: Durable operational state (see master plan section 6.2)
+      enum:
+        - idle
+        - planning
+        - awaiting_input
+        - ready_to_execute
+        - executing
+        - waiting_external
+        - needs_attention
+        - reviewing
+        - fixing
+        - ready_for_review
+        - merged
+        - failed
+        - archived
+
+    Thread:
+      type: object
+      required: [id, tenant_id, project_id, title, status, creator_id, version, created_at, updated_at]
+      properties:
+        id: { $ref: "#/components/schemas/ThreadID" }
+        tenant_id: { $ref: "#/components/schemas/TenantID" }
+        project_id: { $ref: "#/components/schemas/ProjectID" }
+        title: { type: string }
+        status: { $ref: "#/components/schemas/ThreadStatus" }
+        creator_id: { $ref: "#/components/schemas/PrincipalID" }
+        version: { type: integer, format: int64 }
+        created_at: { $ref: "#/components/schemas/Timestamp" }
+        updated_at: { $ref: "#/components/schemas/Timestamp" }
+
+    CreateThreadRequest:
+      type: object
+      required: [project_id, title]
+      additionalProperties: false
+      properties:
+        project_id: { $ref: "#/components/schemas/ProjectID" }
+        title: { type: string, minLength: 1 }
+
+    AppendMessageRequest:
+      type: object
+      required: [content]
+      additionalProperties: false
+      properties:
+        content: { type: string, minLength: 1 }
+
+    Message:
+      type: object
+      required: [id, tenant_id, thread_id, seq, role, delivery_mode, content, created_at]
+      properties:
+        id: { $ref: "#/components/schemas/MessageID" }
+        tenant_id: { $ref: "#/components/schemas/TenantID" }
+        thread_id: { $ref: "#/components/schemas/ThreadID" }
+        seq: { type: integer, format: int64 }
+        role: { type: string, enum: [user, agent, system] }
+        delivery_mode: { type: string, enum: [immediate, queue, steer] }
+        content: { type: string }
+        created_at: { $ref: "#/components/schemas/Timestamp" }
+
+    MessagePage:
+      type: object
+      required: [messages, total]
+      properties:
+        messages:
+          type: array
+          items: { $ref: "#/components/schemas/Message" }
+        total:
+          type: integer
+          format: int64
+          description: Total message count for the thread
+
+    FailureInfo:
+      type: object
+      required: [code, message, transient]
+      properties:
+        code: { type: string }
+        message: { type: string }
+        transient: { type: boolean }
+
+    TaskStatus:
+      type: string
+      enum:
+        - draft
+        - queued
+        - provisioning
+        - working
+        - verifying
+        - integrating
+        - done
+        - waiting_external
+        - blocked
+        - cancelled
+        - failed
+
+    RunStatus:
+      type: string
+      enum:
+        - pending
+        - planning
+        - executing_tasks
+        - integrating
+        - verifying
+        - reporting
+        - completed
+        - failed
+        - cancelled
+
+    Task:
+      type: object
+      required: [id, tenant_id, run_id, thread_id, name, kind, status, depth, depends_on, attempts, max_attempts, version, created_at, updated_at]
+      properties:
+        id: { $ref: "#/components/schemas/TaskID" }
+        tenant_id: { $ref: "#/components/schemas/TenantID" }
+        run_id: { $ref: "#/components/schemas/RunID" }
+        thread_id: { $ref: "#/components/schemas/ThreadID" }
+        name: { type: string }
+        kind: { type: string, enum: [code_change, integration, verification] }
+        status: { $ref: "#/components/schemas/TaskStatus" }
+        depth: { type: integer, minimum: 0 }
+        depends_on:
+          type: array
+          items: { $ref: "#/components/schemas/TaskID" }
+        attempts: { type: integer, minimum: 0 }
+        max_attempts: { type: integer, minimum: 1 }
+        failure: { $ref: "#/components/schemas/FailureInfo" }
+        version: { type: integer, format: int64 }
+        created_at: { $ref: "#/components/schemas/Timestamp" }
+        updated_at: { $ref: "#/components/schemas/Timestamp" }
+
+    Run:
+      type: object
+      required: [id, tenant_id, thread_id, status, idempotency_key, task_ids, version, created_at, updated_at]
+      properties:
+        id: { $ref: "#/components/schemas/RunID" }
+        tenant_id: { $ref: "#/components/schemas/TenantID" }
+        thread_id: { $ref: "#/components/schemas/ThreadID" }
+        spec_id: { $ref: "#/components/schemas/SpecID" }
+        status: { $ref: "#/components/schemas/RunStatus" }
+        idempotency_key: { type: string }
+        task_ids:
+          type: array
+          items: { $ref: "#/components/schemas/TaskID" }
+        report:
+          $ref: "#/components/schemas/RunReport"
+        failure: { $ref: "#/components/schemas/FailureInfo" }
+        version: { type: integer, format: int64 }
+        created_at: { $ref: "#/components/schemas/Timestamp" }
+        updated_at: { $ref: "#/components/schemas/Timestamp" }
+        finished_at: { $ref: "#/components/schemas/Timestamp" }
+
+    RunWithTasks:
+      type: object
+      required: [run, tasks]
+      properties:
+        run: { $ref: "#/components/schemas/Run" }
+        tasks:
+          type: array
+          items: { $ref: "#/components/schemas/Task" }
+
+    Actor:
+      type: object
+      required: [type, id]
+      properties:
+        type: { type: string, enum: [human, service_principal, system] }
+        id: { type: string }
+
+    Event:
+      type: object
+      description: Versioned event envelope (master plan section 11.3)
+      required: [id, type, occurred_at, tenant_id, aggregate_type, aggregate_id, aggregate_version, actor, seq, data]
+      properties:
+        id: { type: string }
+        type:
+          type: string
+          description: Versioned event type; new shapes require a new .vN suffix
+        occurred_at: { $ref: "#/components/schemas/Timestamp" }
+        tenant_id: { $ref: "#/components/schemas/TenantID" }
+        aggregate_type: { type: string }
+        aggregate_id: { type: string }
+        aggregate_version: { type: integer, format: int64 }
+        actor: { $ref: "#/components/schemas/Actor" }
+        trace_id: { type: string }
+        seq:
+          type: integer
+          format: int64
+          description: Monotonic pagination cursor
+        run_id:
+          type: string
+          description: Routing field grouping events into their run stream
+        data:
+          type: object
+          additionalProperties: true
+
+    EventPage:
+      type: object
+      required: [events]
+      properties:
+        events:
+          type: array
+          items: { $ref: "#/components/schemas/Event" }
+
+    SpecContent:
+      type: object
+      required: [outcome, assumptions, requirements, non_goals, success_criteria, blockers]
+      properties:
+        outcome: { type: string }
+        assumptions:
+          type: array
+          items: { type: string }
+        requirements:
+          type: array
+          items: { type: string }
+        non_goals:
+          type: array
+          items: { type: string }
+        success_criteria:
+          type: array
+          items: { type: string }
+        blockers:
+          type: array
+          items: { type: string }
+
+    Severity: { type: string, enum: [blocker, warning, note] }
+    Confidence: { type: string, enum: [high, medium] }
+
+    Finding:
+      type: object
+      required: [category, severity, confidence, location, scenario]
+      properties:
+        category: { type: string }
+        severity: { $ref: "#/components/schemas/Severity" }
+        confidence: { $ref: "#/components/schemas/Confidence" }
+        location: { type: string }
+        scenario:
+          type: string
+          description: Concrete failure scenario the finding describes
+
+    Evidence:
+      type: object
+      required: [criterion, command, exit_code, passed, at]
+      properties:
+        criterion: { type: string }
+        command:
+          type: array
+          items: { type: string }
+        exit_code: { type: integer }
+        passed: { type: boolean }
+        log_artifact_id: { $ref: "#/components/schemas/ArtifactID" }
+        at: { $ref: "#/components/schemas/Timestamp" }
+
+    ReportTask:
+      type: object
+      required: [id, name, branch, status, attempts]
+      properties:
+        id: { $ref: "#/components/schemas/TaskID" }
+        name: { type: string }
+        branch: { type: string }
+        commit_sha: { type: string }
+        status: { $ref: "#/components/schemas/TaskStatus" }
+        attempts: { type: integer }
+        failure: { $ref: "#/components/schemas/FailureInfo" }
+
+    ReportIntegration:
+      type: object
+      required: [branch]
+      properties:
+        branch: { type: string }
+        sha: { type: string }
+        conflicts:
+          type: array
+          items: { type: string }
+
+    ReportVerification:
+      type: object
+      required: [passed, evidence]
+      properties:
+        passed: { type: boolean }
+        evidence:
+          type: array
+          items: { $ref: "#/components/schemas/Evidence" }
+
+    BudgetSummary:
+      type: object
+      required: [tasks_used, max_tasks, exec_ops_used, max_exec_ops]
+      properties:
+        tasks_used: { type: integer }
+        max_tasks: { type: integer }
+        exec_ops_used: { type: integer }
+        max_exec_ops: { type: integer }
+
+    ReportArtifactRef:
+      type: object
+      required: [id, kind, digest]
+      properties:
+        id: { $ref: "#/components/schemas/ArtifactID" }
+        kind: { type: string, enum: [diff, log, report] }
+        digest: { type: string }
+
+    RunReport:
+      type: object
+      required: [run_id, thread_id, spec_id, spec, tasks, integration, verification, findings, artifacts, budget, ready_for_review, summary, started_at, finished_at]
+      properties:
+        run_id: { $ref: "#/components/schemas/RunID" }
+        thread_id: { $ref: "#/components/schemas/ThreadID" }
+        spec_id: { $ref: "#/components/schemas/SpecID" }
+        spec: { $ref: "#/components/schemas/SpecContent" }
+        tasks:
+          type: array
+          items: { $ref: "#/components/schemas/ReportTask" }
+        integration: { $ref: "#/components/schemas/ReportIntegration" }
+        verification: { $ref: "#/components/schemas/ReportVerification" }
+        findings:
+          type: array
+          items: { $ref: "#/components/schemas/Finding" }
+        artifacts:
+          type: array
+          items: { $ref: "#/components/schemas/ReportArtifactRef" }
+        budget: { $ref: "#/components/schemas/BudgetSummary" }
+        ready_for_review: { type: boolean }
+        summary: { type: string }
+        started_at: { $ref: "#/components/schemas/Timestamp" }
+        finished_at: { $ref: "#/components/schemas/Timestamp" }

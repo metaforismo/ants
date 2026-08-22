@@ -1,0 +1,12 @@
+{
+  "name": "ants-monorepo",
+  "private": true,
+  "packageManager": "pnpm@10.28.0",
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "contracts:generate": "pnpm --filter @ants/contracts generate",
+    "contracts:test": "pnpm --filter @ants/contracts test"
+  }
+}
