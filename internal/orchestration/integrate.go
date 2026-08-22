@@ -184,7 +184,14 @@ func (e *Engine) finishUnsuccessfully(ctx context.Context, st *runState) error {
 
 // failRun terminates run and thread with explicit failure info and stores a
 // partial report so observers see how far the pipeline got and why.
+//
+// Cancellation takes precedence over failure classification: when the unit
+// of execution is being torn down, terminal state must be cancelled even if
+// an individual step returned some other error.
 func (e *Engine) failRun(ctx context.Context, st *runState, code string, cause error) error {
+	if ctx.Err() != nil {
+		return e.checkCancelled(ctx, st)
+	}
 	failure := &domain.FailureInfo{Code: code, Message: cause.Error(), Transient: false}
 
 	expected := st.run.Version
@@ -250,6 +257,13 @@ func (e *Engine) checkCancelled(ctx context.Context, st *runState) error {
 			return err
 		}
 		_ = e.emitEvent(ctx, evtFromRun(st.run, domain.EventRunStatusChanged, map[string]any{"to": string(domain.RunCancelled)}))
+	}
+	for _, t := range st.tasks {
+		switch t.Status {
+		case domain.TaskDone, domain.TaskFailed, domain.TaskCancelled:
+		default:
+			_ = e.cancelTask(ctx, st, t)
+		}
 	}
 	switch st.thread.Status {
 	case domain.ThreadExecuting, domain.ThreadReadyToExecute:

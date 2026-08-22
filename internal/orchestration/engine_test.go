@@ -317,9 +317,40 @@ func TestBudgetCapStopsRunBeforeOverspend(t *testing.T) {
 	}
 }
 
+// gateDriver parks the first matching command until the test releases it or
+// the context is cancelled, making cancellation tests deterministic.
+type gateDriver struct {
+	sandbox.Driver
+	gateKey string
+	release chan struct{}
+}
+
+func (g *gateDriver) Exec(ctx context.Context, id domain.SandboxID, req sandbox.ExecRequest) (sandbox.ExecResult, error) {
+	if sandbox.JoinCommand(req.Command) != g.gateKey {
+		return g.Driver.Exec(ctx, id, req)
+	}
+	select {
+	case <-ctx.Done():
+		return sandbox.ExecResult{}, &domain.Error{
+			Kind:    domain.ErrKindCancelled,
+			Code:    "sandbox_exec_cancelled",
+			Message: "execution cancelled while gated",
+			Cause:   ctx.Err(),
+		}
+	case <-g.release:
+		return g.Driver.Exec(ctx, id, req)
+	}
+}
+
 func TestCancellationMarksRunAndThreadCooperatively(t *testing.T) {
 	h := newHarness(t)
 	scriptHappyPath(h)
+	gated := &gateDriver{
+		Driver:  h.fake,
+		gateKey: "bash tests/calc_test.sh",
+		release: make(chan struct{}),
+	}
+	h.engine.deps.Sandbox = gated
 	_, thread := h.seedWorld(t)
 	ctx := context.Background()
 
@@ -331,6 +362,9 @@ func TestCancellationMarksRunAndThreadCooperatively(t *testing.T) {
 	go func() {
 		execDone <- h.engine.Execute(ctx, testTenantID, start.Run.ID)
 	}()
+
+	// Cancellation is only possible once the worker registered; the gated
+	// verification command guarantees execution is still in flight.
 	cancelled := false
 	deadline := time.Now().Add(5 * time.Second)
 	for time.Now().Before(deadline) {
@@ -342,7 +376,8 @@ func TestCancellationMarksRunAndThreadCooperatively(t *testing.T) {
 	}
 	execErr := <-execDone
 	if !cancelled {
-		t.Skipf("execution finished before cancellation could register (err=%v)", execErr)
+		close(gated.release)
+		t.Skipf("execution finished before cancellation could register")
 	}
 	if domain.ErrKindOf(execErr) != domain.ErrKindCancelled {
 		t.Fatalf("expected cancellation error, got %v", execErr)
