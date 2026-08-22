@@ -6,9 +6,16 @@ Like an ant colony, specialized agents divide work, operate independently, share
 
 ## Status
 
-The foundation tranche is implemented and green: a deterministic vertical slice runs end to end — request → plan/spec → isolated parallel tasks → integration → tests → evidence-based report — with real git commits and really executed verification commands.
+Two tranches are implemented and green. The deterministic vertical slice runs
+end to end — request → plan/spec → isolated parallel tasks → integration →
+tests → evidence-based report — with real git commits and really executed
+verification commands. On top of it, execution is durable: state transitions,
+events, and their deliveries commit atomically (unit of work + transactional
+outbox), runs are dispatched through tenant-scoped run claims with fencing and
+bounded retries by a process-level worker, and the server exposes honest
+readiness, loopback-confined dev auth, and bounded HTTP lifecycles.
 
-Read the [master plan](docs/MASTER_PLAN.md) for the complete product and implementation strategy. The condensed [resources index](docs/RESOURCES.md) links directly to the repositories, documentation, papers, and product research that accelerate development. Architecture decisions live in [docs/adr](docs/adr); the current implementation state and its proof matrix live in [docs/TRANCHE_1_EVIDENCE.md](docs/TRANCHE_1_EVIDENCE.md).
+Read the [master plan](docs/MASTER_PLAN.md) for the complete product and implementation strategy. The condensed [resources index](docs/RESOURCES.md) links directly to the repositories, documentation, papers, and product research that accelerate development. Architecture decisions live in [docs/adr](docs/adr); the current implementation state and its proof matrix live in [docs/TRANCHE_2_FINAL_EVIDENCE.md](docs/TRANCHE_2_FINAL_EVIDENCE.md) (with per-tranche records alongside).
 
 ## Quick start
 

@@ -78,6 +78,7 @@ func (UnconfiguredAuthenticator) Authenticate(_ *http.Request) (*Principal, *dom
 type Server struct {
 	cfg    config.Config
 	repos  ports.Repositories
+	uow    ports.Transactor
 	auth   Authenticator
 	engine *orchestration.Engine
 	// ready reports whether backing dependencies can serve traffic. It is
@@ -94,6 +95,10 @@ type Server struct {
 type Deps struct {
 	Config config.Config
 	Repos  ports.Repositories
+	// Uow delimits units of work so a resource and its creation event commit
+	// together (ADR-0010). Required: an API write that emits an event must
+	// never be able to commit the state and lose the notification.
+	Uow    ports.Transactor
 	Engine *orchestration.Engine
 	Logger *slog.Logger
 	// Ready performs the dependency checks behind /readyz. Required: a
@@ -102,8 +107,8 @@ type Deps struct {
 }
 
 func New(deps Deps) (*Server, error) {
-	if deps.Repos.Tenants == nil || deps.Engine == nil || deps.Logger == nil {
-		return nil, fmt.Errorf("server: repos, engine and logger are required")
+	if deps.Repos.Tenants == nil || deps.Uow == nil || deps.Engine == nil || deps.Logger == nil {
+		return nil, fmt.Errorf("server: repos, uow, engine and logger are required")
 	}
 	if deps.Ready == nil {
 		return nil, fmt.Errorf("server: a readiness check is required")
@@ -117,6 +122,7 @@ func New(deps Deps) (*Server, error) {
 	srv := &Server{
 		cfg:    deps.Config,
 		repos:  deps.Repos,
+		uow:    deps.Uow,
 		auth:   auth,
 		engine: deps.Engine,
 		ready:  deps.Ready,
