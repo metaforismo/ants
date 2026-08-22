@@ -126,6 +126,14 @@ func TestValidationFailures(t *testing.T) {
 		func(c *Config) { c.Orchestrator.MaxAttempts = 11 },
 		func(c *Config) { c.Sandbox.Driver = "docker" },
 		func(c *Config) { c.SCM.Driver = "github_live" },
+		func(c *Config) { c.Worker.BatchSize = 0 },
+		func(c *Config) { c.Worker.Concurrency = 65 },
+		// A heartbeat interval without margin inside the lease would expire
+		// live workers after two missed beats.
+		func(c *Config) {
+			c.Worker.Lease = Duration{2 * time.Second}
+			c.Worker.HeartbeatEvery = Duration{time.Second}
+		},
 		func(c *Config) { c.Log.Level = "verbose" },
 		func(c *Config) { c.Log.Format = "csv" },
 	}
@@ -135,6 +143,32 @@ func TestValidationFailures(t *testing.T) {
 		if err := cfg.Validate(); err == nil {
 			t.Errorf("case %d: expected validation failure", i)
 		}
+	}
+}
+
+func TestWorkerEnvLayering(t *testing.T) {
+	cfg, err := load("", lookupFrom(map[string]string{
+		"ANTS_WORKER_BATCH_SIZE":      "16",
+		"ANTS_WORKER_INTERVAL":        "1s",
+		"ANTS_WORKER_LEASE":           "45s",
+		"ANTS_WORKER_HEARTBEAT_EVERY": "7s",
+		"ANTS_WORKER_CLEANUP_TIMEOUT": "3s",
+		"ANTS_WORKER_CONCURRENCY":     "9",
+	}))
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	if cfg.Worker.BatchSize != 16 || cfg.Worker.Concurrency != 9 {
+		t.Fatalf("int env not applied: %+v", cfg.Worker)
+	}
+	if cfg.Worker.Interval.Duration != time.Second ||
+		cfg.Worker.Lease.Duration != 45*time.Second ||
+		cfg.Worker.HeartbeatEvery.Duration != 7*time.Second ||
+		cfg.Worker.CleanupTimeout.Duration != 3*time.Second {
+		t.Fatalf("duration env not applied: %+v", cfg.Worker)
+	}
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("layered worker config must validate: %v", err)
 	}
 }
 

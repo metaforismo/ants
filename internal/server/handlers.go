@@ -6,7 +6,6 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
-	"time"
 
 	"github.com/metaforismo/ants/internal/domain"
 	"github.com/metaforismo/ants/internal/orchestration"
@@ -252,26 +251,11 @@ func (s *Server) handleStartRun(w http.ResponseWriter, r *http.Request) {
 		writeProblem(w, r, asDomainError(startErr))
 		return
 	}
-	if !result.Replayed {
-		s.launchRunWorker(r, result.Run.ID, p.TenantID)
-	}
+	// StartRun only enqueues durable work (run + runnable claim in one unit
+	// of work); execution is owned by the process-level run worker started
+	// next to the outbox dispatcher (ADR-0012 part 2). Nothing here spawns
+	// background work tied to this request's context.
 	writeJSONStatus(w, http.StatusAccepted, result.Run)
-}
-
-// launchRunWorker detaches execution from the request lifecycle while keeping
-// the server's drain guarantee through runWG.
-func (s *Server) launchRunWorker(r *http.Request, runID domain.RunID, tenantID domain.TenantID) {
-	s.runWG.Add(1)
-	go func() {
-		defer s.runWG.Done()
-		ctx, cancel := context.WithTimeout(context.WithoutCancel(r.Context()), time.Duration(s.cfg.Orchestrator.StageTimeout.Duration)*4)
-		defer cancel()
-		if execErr := s.engine.Execute(ctx, tenantID, runID); execErr != nil && !errors.Is(execErr, context.Canceled) {
-			s.log.Error("run execution failed", "run_id", string(runID), "error", safeLogError(execErr))
-		} else {
-			s.log.Info("run execution finished", "run_id", string(runID))
-		}
-	}()
 }
 
 func (s *Server) handleGetRun(w http.ResponseWriter, r *http.Request) {

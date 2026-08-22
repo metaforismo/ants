@@ -1,6 +1,6 @@
-# ADR 0012 — Durable run claims (part 1: storage aggregate)
+# ADR 0012 — Durable run claims (part 1: storage aggregate; part 2: worker integration)
 
-Status: accepted (part 1 of 2; worker integration follows in part 2)
+Status: accepted (parts 1 and 2 complete)
 Date: 2026-08-22
 
 ## Context
@@ -87,14 +87,72 @@ Explicitly deferred to **part 2** (PR D2): worker loops,
 acquisition-driven execution handoff, heartbeat scheduling policy,
 configuration surface, server lifecycle.
 
+## Decision (part 2 — worker integration)
+
+**A process-level executor owns run execution.** `internal/worker.Worker`
+claims bounded batches through `RunClaims.AcquireNext` and drives each fenced
+claim through the orchestration engine. StartRun (HTTP path) only enqueues —
+it never spawns execution tied to a request. The server handler contract is
+"return 202 once the run + claim unit is durable"; the API test suite pins
+that no runtime means no execution, and that with the runtime present the
+same request completes end-to-end.
+
+**Claim only what you execute now.** Each round acquires at most
+`min(batch_size, concurrency)` claims: the worker never holds more leases
+than it actively executes and heartbeats, so no claim ever sits queued on an
+un-renewed lease. Leftover runnable work is picked up by the next poll round.
+
+**Heartbeat policy.** While the engine executes, a renewal loop extends the
+lease every `heartbeat_every` on a context detached from cancellation so an
+in-flight renewal always delivers its verdict. Losing the lease — expiry or
+any fencing conflict — cancels the execution immediately and marks the epoch
+fenced: a fenced epoch performs no Complete, Release, or cleanup at all; its
+claim converges through expiry-based reclaim. The config validator enforces
+`lease >= 3 × heartbeat_every`, so two consecutive missed beats can never
+expire a live holder.
+
+**Terminal persistence outlives cancellation.** Every disposition write
+(Complete after success, Release for shutdown/pre-terminal exits, recovery
+convergence, terminal cleanup) runs on `context.WithoutCancel` + a bounded
+`cleanup_timeout`: a shutdown racing execution must never abort the final
+write, and no write may hang forever. Guarded store operations make any race
+with a successor epoch a typed conflict, not corruption.
+
+**Interrupted runs converge, never resume.** A claimed run found in any
+non-pending, non-terminal state was abandoned mid-flight by an earlier epoch.
+The engine's `RecoverInterrupted` finishes it as `failed` with code
+`run_interrupted` in one unit of work (run update + classified status event +
+outbox enqueue), routes the thread like any failure, is idempotent for
+already-terminal runs, refuses pending runs (they were never started and must
+execute), and deliberately touches no claim row — deletion stays with the
+credential-holding epoch via guarded operations.
+
+**Lifecycle order in `ants serve`.** On shutdown: stop accepting HTTP, stop
+claiming and wait for active executions to unwind (their detached writes
+still land), then stop the outbox dispatcher for one final delivery round of
+the events those writes emitted. One operator budget (`server.shutdown_timeout`)
+covers all phases; exhausting it names what did not finish — including
+distinguishing "the dispatcher failed its final round" from "the budget was
+gone before that round could be attempted". Nothing is silently lost:
+whatever remains converges through lease expiry and recovery.
+
+**Configuration surface.** The `worker:` config section (batch_size,
+interval, lease, heartbeat_every, cleanup_timeout, concurrency) validates at
+startup with production floors (interval ≥ 10ms, lease ≥ 1s, cleanup_timeout
+≥ 100ms, concurrency ≤ 64) plus the heartbeat-margin rule; every field is
+environment-overridable via `ANTS_WORKER_*`.
+
 ## Consequences
 
 - Recovery becomes possible without guesswork: any worker can safely adopt an
   expired run; no worker can act on a claim it does not hold.
-- Generation checks must wrap any future external side effect tied to a run
-  (part 2); the storage layer enforces credentials but cannot fence VMs.
-- Attempts is observational (reclaim counts), not a retry budget; caps belong
-  to engine policy in part 2.
+- Generation checks wrap every external side effect tied to a run: the worker
+  cancels fenced executions before disposal and relies on credential-guarded
+  writes everywhere else; the storage layer enforces credentials but cannot
+  fence VMs, so future side-effecting call sites must check the epoch the way
+  `executeClaim` does.
+- Attempts is observational (reclaim counts), not a retry budget; retry caps
+  remain engine policy.
 - One latent bug surfaced by the new shared suite was fixed:
   `RunRepository.Update` on PostgreSQL nulled the NOT NULL `principal`
   column for principals saved as empty string.

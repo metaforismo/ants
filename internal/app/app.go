@@ -21,6 +21,7 @@ import (
 	"github.com/metaforismo/ants/internal/scm"
 	memorystore "github.com/metaforismo/ants/internal/store/memory"
 	"github.com/metaforismo/ants/internal/store/postgres"
+	"github.com/metaforismo/ants/internal/worker"
 )
 
 // App holds the fully wired application for one configuration.
@@ -34,6 +35,7 @@ type App struct {
 	SCM     scm.Driver
 	Seeder  orchestration.Seeder
 	Outbox  *outbox.Dispatcher
+	Worker  *worker.Worker
 }
 
 // Build wires every component from cfg. Store mode postgres is rejected with
@@ -120,13 +122,18 @@ func Build(cfg config.Config, logOut io.Writer) (*App, error) {
 		return nil, fmt.Errorf("app: wire orchestration: %w", err)
 	}
 
+	// One stable identity per process for both durable subsystems: the outbox
+	// lease holder and the run claim owner must not change while the process
+	// runs, and must differ between processes. Tests build components
+	// directly to inject their own identities.
+	nodeID, nerr := os.Hostname()
+	if nerr != nil {
+		nodeID = "unknown-host"
+	}
+	nodeID = fmt.Sprintf("%s-%d", nodeID, os.Getpid())
+
 	// The dispatcher drains the durable outbox both store modes fill on
 	// event append (ADR-0011); long-running processes start it via Run.
-	workerID, werr := os.Hostname()
-	if werr != nil {
-		workerID = "unknown-host"
-	}
-	workerID = fmt.Sprintf("%s-%d", workerID, os.Getpid())
 	dispatcher, derr := outbox.New(repos.Outbox,
 		outbox.LogSink{Logger: logger}, logger,
 		outbox.Config{
@@ -136,9 +143,25 @@ func Build(cfg config.Config, logOut io.Writer) (*App, error) {
 			MaxAttempts:      cfg.Outbox.MaxAttempts,
 			RetryBackoffBase: cfg.Outbox.RetryBackoffBase.Duration,
 		},
-		workerID)
+		nodeID)
 	if derr != nil {
 		return nil, fmt.Errorf("app: wire outbox dispatcher: %w", derr)
+	}
+
+	// The run worker owns execution of every started run (ADR-0012 part 2);
+	// StartRun only enqueues the durable claim.
+	runWorker, werr := worker.New(repos.RunClaims, repos.Runs, engine, logger,
+		worker.Config{
+			BatchSize:      cfg.Worker.BatchSize,
+			Interval:       cfg.Worker.Interval.Duration,
+			Lease:          cfg.Worker.Lease.Duration,
+			HeartbeatEvery: cfg.Worker.HeartbeatEvery.Duration,
+			CleanupTimeout: cfg.Worker.CleanupTimeout.Duration,
+			Concurrency:    cfg.Worker.Concurrency,
+		},
+		nodeID)
+	if werr != nil {
+		return nil, fmt.Errorf("app: wire run worker: %w", werr)
 	}
 
 	return &App{
@@ -151,6 +174,7 @@ func Build(cfg config.Config, logOut io.Writer) (*App, error) {
 		SCM:     scmDriver,
 		Seeder:  seeder{},
 		Outbox:  dispatcher,
+		Worker:  runWorker,
 	}, nil
 }
 
