@@ -3,6 +3,7 @@ package server
 import (
 	"context"
 	"errors"
+	"fmt"
 	"net/http"
 	"strconv"
 	"strings"
@@ -35,11 +36,18 @@ func (s *Server) handleCreateTenant(w http.ResponseWriter, r *http.Request) {
 		writeProblem(w, r, asDomainError(terr))
 		return
 	}
-	if cerr := s.repos.Tenants.Create(r.Context(), tenant); cerr != nil {
-		writeProblem(w, r, asDomainError(cerr))
+	// Tenant insert and its creation event commit as one unit (ADR-0010):
+	// a tenant whose event cannot be persisted must not exist half-notified,
+	// and the durable outbox delivery joins the same commit via Append.
+	if terr := s.uow.Do(r.Context(), func(ctx context.Context) error {
+		if cerr := s.repos.Tenants.Create(ctx, tenant); cerr != nil {
+			return cerr
+		}
+		return s.emitTenantEvent(ctx, tenant)
+	}); terr != nil {
+		writeProblem(w, r, asDomainError(terr))
 		return
 	}
-	s.emitTenantEvent(r.Context(), tenant)
 	writeJSON(w, http.StatusCreated, tenant)
 }
 
@@ -273,7 +281,11 @@ func (s *Server) handleGetRun(w http.ResponseWriter, r *http.Request) {
 		writeProblem(w, r, asDomainError(getErr))
 		return
 	}
-	tasks, _ := s.repos.Tasks.ListByRun(r.Context(), p.TenantID, runID)
+	tasks, listErr := s.repos.Tasks.ListByRun(r.Context(), p.TenantID, runID)
+	if listErr != nil {
+		writeProblem(w, r, asDomainError(listErr))
+		return
+	}
 	writeJSON(w, http.StatusOK, map[string]any{"run": run, "tasks": tasks})
 }
 
@@ -403,11 +415,13 @@ func queryInt64(r *http.Request, name string) int64 {
 	return v
 }
 
-func (s *Server) emitTenantEvent(ctx context.Context, tenant *domain.Tenant) {
+// emitTenantEvent appends the tenant-created event; its durable outbox
+// delivery joins whatever unit the caller has open (ADR-0011), so a failure
+// rolls back together with the tenant insert.
+func (s *Server) emitTenantEvent(ctx context.Context, tenant *domain.Tenant) error {
 	id, err := domain.NewID(domain.PrefixEvent)
 	if err != nil {
-		s.log.Error("event id generation failed", "error", safeLogError(err))
-		return
+		return fmt.Errorf("generate event id: %w", err)
 	}
 	evt := &domain.Event{
 		ID:            domain.EventID(id),
@@ -421,9 +435,7 @@ func (s *Server) emitTenantEvent(ctx context.Context, tenant *domain.Tenant) {
 			"plan": string(tenant.Plan),
 		},
 	}
-	if err := s.repos.Events.Append(ctx, evt); err != nil {
-		s.log.Error("tenant event append failed", "error", safeLogError(err))
-	}
+	return s.repos.Events.Append(ctx, evt)
 }
 
 func writeInternal(w http.ResponseWriter, r *http.Request, err error) {
@@ -445,13 +457,4 @@ func asDomainError(err error) *domain.Error {
 		return dom
 	}
 	return domain.Internalf(err, "internal", "%v", err)
-}
-
-func safeLogError(err error) string {
-	const max = 512
-	msg := err.Error()
-	if len(msg) > max {
-		return msg[:max]
-	}
-	return msg
 }

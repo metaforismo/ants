@@ -16,6 +16,7 @@ func newServer(application *app.App) (*server.Server, error) {
 	return server.New(server.Deps{
 		Config: application.Config,
 		Repos:  application.Repos,
+		Uow:    application.Uow,
 		Engine: application.Engine,
 		Logger: application.Logger,
 		Ready:  application.Ready,

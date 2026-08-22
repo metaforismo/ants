@@ -23,13 +23,15 @@ networks.
   everywhere).
 - Audit events record every policy decision with actor, action, and outcome.
 
-## Known limitations (accepted for tranche 1)
+## Known limitations (accepted for the current tranches)
 
 - Process-level sandbox is not isolation from a motivated attacker.
-- Dev header authentication must never be enabled outside local development;
-  servers refuse all authenticated routes without it.
-- No durable outbox yet (ADR-0005); event delivery guarantees are
-  single-process until the Postgres adapter lands.
+- Dev header authentication is confined to loopback binds at startup
+  (ADR-0013) and must never be enabled outside local development; full OIDC
+  replaces it in a later horizon.
+- The outbox dispatcher is single-process; multi-node delivery scale-out,
+  dead-letter requeue/discard tooling, and outbox retention are deferred
+  (ADR-0011, ADR-0013).
 
 ## Reporting a vulnerability
 

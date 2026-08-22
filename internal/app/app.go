@@ -30,6 +30,7 @@ type App struct {
 	Logger  *slog.Logger
 	Clock   ports.Clock
 	Repos   ports.Repositories
+	Uow     ports.Transactor
 	Engine  *orchestration.Engine
 	Sandbox sandbox.Driver
 	SCM     scm.Driver
@@ -177,6 +178,7 @@ func Build(cfg config.Config, logOut io.Writer) (*App, error) {
 		Logger:  logger,
 		Clock:   clock,
 		Repos:   repos,
+		Uow:     transactor,
 		Engine:  engine,
 		Sandbox: sandboxDriver,
 		SCM:     scmDriver,
