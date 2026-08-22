@@ -1,0 +1,42 @@
+version: 1
+capabilities:
+  - id: arithmetic-helpers
+    request_keywords: ["add", "multiply"]
+    spec:
+      outcome: "calc.sh evaluates integer addition and multiplication"
+      requirements:
+        - "lib_add.sh defines add(a, b) printing a+b"
+        - "lib_mul.sh defines multiply(a, b) printing a*b"
+      assumptions:
+        - "operands are small integers that fit shell arithmetic"
+      non_goals:
+        - "floating point support"
+        - "additional operations"
+      success_criteria:
+        - "bash tests/calc_test.sh exits 0 on the integrated tree"
+      blockers: []
+    verify_all:
+      - ["bash", "tests/calc_test.sh"]
+    tasks:
+      - name: implement-add
+        commit_message: "feat(calc): implement integer addition"
+        files:
+          lib_add.sh: |
+            # integer addition; see tests/calc_test.sh for the contract.
+            add() {
+              echo $(($1 + $2))
+            }
+        verify:
+          - ["test", "-f", "lib_add.sh"]
+          - ["sh", "calc.sh", "add", "20", "22"]
+      - name: implement-multiply
+        commit_message: "feat(calc): implement integer multiplication"
+        files:
+          lib_mul.sh: |
+            # integer multiplication; see tests/calc_test.sh for the contract.
+            multiply() {
+              echo $(($1 * $2))
+            }
+        verify:
+          - ["test", "-f", "lib_mul.sh"]
+          - ["sh", "calc.sh", "multiply", "6", "7"]
