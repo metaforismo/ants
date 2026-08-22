@@ -61,6 +61,28 @@ paths:
         "503":
           $ref: "#/components/responses/Problem"
 
+  /metrics:
+    get:
+      tags: [system]
+      summary: Prometheus metrics exposition
+      description: |
+        Aggregate operational metrics for this process (HTTP edge, outbox
+        dispatcher, run worker, Go runtime) in Prometheus text exposition
+        format. Served only when `metrics.enabled` is true in the server
+        configuration; otherwise the route does not exist. Labels carry
+        fixed vocabularies only and never include tenant or resource
+        identifiers.
+      operationId: getMetrics
+      responses:
+        "200":
+          description: Prometheus text exposition of the current metric set
+          content:
+            text/plain:
+              schema:
+                type: string
+                example: |
+                  ants_http_requests_total{method="POST",route="/v1/tenants",status="201"} 3
+
   /v1/tenants:
     post:
       tags: [tenants]

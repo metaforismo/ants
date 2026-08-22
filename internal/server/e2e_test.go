@@ -81,12 +81,13 @@ func buildServerWithReady(
 ) *httptest.Server {
 	t.Helper()
 	srv, err := server.New(server.Deps{
-		Config: cfg,
-		Repos:  application.Repos,
-		Uow:    application.Uow,
-		Engine: application.Engine,
-		Logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
-		Ready:  ready,
+		Config:  cfg,
+		Repos:   application.Repos,
+		Uow:     application.Uow,
+		Engine:  application.Engine,
+		Logger:  slog.New(slog.NewTextHandler(io.Discard, nil)),
+		Ready:   ready,
+		Metrics: application.Metrics,
 	})
 	if err != nil {
 		t.Fatalf("build server: %v", err)

@@ -69,6 +69,30 @@ func TestUnknownYAMLKeyRejected(t *testing.T) {
 	}
 }
 
+// TestMetricsYAMLSection covers the metrics block: the enabled flag parses
+// from file and unknown keys inside the section fail under strict decoding.
+func TestMetricsYAMLSection(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "ants.yaml")
+	if err := os.WriteFile(path, []byte("metrics:\n  enbled: true\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := load(path, lookupFrom(nil)); err == nil || !strings.Contains(err.Error(), "enbled") {
+		t.Fatalf("unknown key in metrics section must fail loudly, got %v", err)
+	}
+	path = filepath.Join(dir, "ants-off.yaml")
+	if err := os.WriteFile(path, []byte("metrics:\n  enabled: false\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := load(path, lookupFrom(nil))
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	if cfg.Metrics.Enabled {
+		t.Fatal("metrics.enabled=false from file must be retained")
+	}
+}
+
 func TestUnknownEnvVarRejected(t *testing.T) {
 	t.Setenv("ANTS_ORCHESTRATOR_MAX_PARALEL_TASKS", "3") // deliberate typo
 	if _, err := load("", os.LookupEnv); err == nil || !strings.Contains(err.Error(), "ANTS_ORCHESTRATOR_MAX_PARALEL_TASKS") {
@@ -236,6 +260,23 @@ func TestServerEnvLayering(t *testing.T) {
 	}
 	if err := cfg.Validate(); err != nil {
 		t.Fatalf("layered server config must validate: %v", err)
+	}
+}
+
+func TestMetricsEnvLayering(t *testing.T) {
+	cfg, err := load("", lookupFrom(map[string]string{"ANTS_METRICS_ENABLED": "false"}))
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	if cfg.Metrics.Enabled {
+		t.Fatalf("metrics must be disableable via environment: %+v", cfg.Metrics)
+	}
+	cfg, err = load("", lookupFrom(map[string]string{"ANTS_METRICS_ENABLED": "true"}))
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	if !cfg.Metrics.Enabled {
+		t.Fatalf("metrics env override not applied: %+v", cfg.Metrics)
 	}
 }
 

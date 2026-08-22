@@ -222,6 +222,14 @@ type Log struct {
 	Format LogFormat `yaml:"format"`
 }
 
+// Metrics gates the Prometheus exposition on the API listener (ADR-0014).
+// Enabled by default: an operable system measures itself; deployments that
+// must not expose the endpoint can turn it off until an admin listener
+// ships.
+type Metrics struct {
+	Enabled bool `yaml:"enabled"`
+}
+
 type Config struct {
 	Server       Server       `yaml:"server"`
 	Store        Store        `yaml:"store"`
@@ -231,6 +239,7 @@ type Config struct {
 	Policy       Policy       `yaml:"policy"`
 	Outbox       Outbox       `yaml:"outbox"`
 	Worker       Worker       `yaml:"worker"`
+	Metrics      Metrics      `yaml:"metrics"`
 	Log          Log          `yaml:"log"`
 }
 
@@ -289,6 +298,9 @@ func Defaults() Config {
 			CleanupTimeout: Duration{10 * time.Second},
 			Concurrency:    4,
 			MaxAttempts:    3,
+		},
+		Metrics: Metrics{
+			Enabled: true,
 		},
 		Log: Log{
 			Level:  LogInfo,
@@ -561,6 +573,9 @@ func (c *Config) ApplyEnv(lookup LookupFunc) error {
 	if err := intVar(envWorkerMaxAttempts, &c.Worker.MaxAttempts); err != nil {
 		return err
 	}
+	if err := boolVar(envMetricsEnabled, &c.Metrics.Enabled); err != nil {
+		return err
+	}
 	level := string(c.Log.Level)
 	if err := str(envLogLevel, &level); err != nil {
 		return err
@@ -611,6 +626,7 @@ const (
 	envWorkerCleanup          = "ANTS_WORKER_CLEANUP_TIMEOUT"
 	envWorkerConcurrency      = "ANTS_WORKER_CONCURRENCY"
 	envWorkerMaxAttempts      = "ANTS_WORKER_MAX_ATTEMPTS"
+	envMetricsEnabled         = "ANTS_METRICS_ENABLED"
 	envLogLevel               = "ANTS_LOG_LEVEL"
 	envLogFormat              = "ANTS_LOG_FORMAT"
 )
@@ -630,6 +646,7 @@ var knownEnvVars = map[string]bool{
 	envWorkerBatchSize: true, envWorkerInterval: true, envWorkerLease: true,
 	envWorkerHeartbeat: true, envWorkerCleanup: true, envWorkerConcurrency: true,
 	envWorkerMaxAttempts: true,
+	envMetricsEnabled:    true,
 }
 
 // unknownAntsVars scans the process environment so a mistyped override fails

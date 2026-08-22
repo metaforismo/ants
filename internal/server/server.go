@@ -11,8 +11,11 @@ import (
 	"net/http"
 	"time"
 
+	"github.com/prometheus/client_golang/prometheus/promhttp"
+
 	"github.com/metaforismo/ants/internal/config"
 	"github.com/metaforismo/ants/internal/domain"
+	"github.com/metaforismo/ants/internal/metrics"
 	"github.com/metaforismo/ants/internal/orchestration"
 	"github.com/metaforismo/ants/internal/ports"
 )
@@ -88,6 +91,9 @@ type Server struct {
 	ready func(ctx context.Context) error
 	log   *slog.Logger
 	clock ports.Clock
+	// metricsHandler serves the Prometheus exposition when metrics are
+	// enabled; nil means the route is not registered at all (ADR-0014).
+	metrics *metrics.Metrics
 
 	http *http.Server
 }
@@ -104,6 +110,10 @@ type Deps struct {
 	// Ready performs the dependency checks behind /readyz. Required: a
 	// server that cannot state its readiness must not pretend to be ready.
 	Ready func(ctx context.Context) error
+	// Metrics is the Prometheus collector behind /metrics. Required when the
+	// configuration enables metrics: a server that promises an exposition
+	// must not silently serve none.
+	Metrics *metrics.Metrics
 }
 
 func New(deps Deps) (*Server, error) {
@@ -113,6 +123,9 @@ func New(deps Deps) (*Server, error) {
 	if deps.Ready == nil {
 		return nil, fmt.Errorf("server: a readiness check is required")
 	}
+	if deps.Config.Metrics.Enabled && deps.Metrics == nil {
+		return nil, fmt.Errorf("server: metrics are enabled but no collector was provided")
+	}
 	var auth Authenticator
 	if deps.Config.Server.DevHeaderAuth {
 		auth = &DevHeaderAuthenticator{Tenants: deps.Repos.Tenants}
@@ -120,14 +133,15 @@ func New(deps Deps) (*Server, error) {
 		auth = UnconfiguredAuthenticator{}
 	}
 	srv := &Server{
-		cfg:    deps.Config,
-		repos:  deps.Repos,
-		uow:    deps.Uow,
-		auth:   auth,
-		engine: deps.Engine,
-		ready:  deps.Ready,
-		log:    deps.Logger,
-		clock:  ports.SystemClock{},
+		cfg:     deps.Config,
+		repos:   deps.Repos,
+		uow:     deps.Uow,
+		auth:    auth,
+		engine:  deps.Engine,
+		ready:   deps.Ready,
+		log:     deps.Logger,
+		clock:   ports.SystemClock{},
+		metrics: deps.Metrics,
 	}
 	mux := http.NewServeMux()
 	srv.routes(mux)
@@ -158,6 +172,7 @@ func APIRoutes() []Route {
 	return []Route{
 		{Method: http.MethodGet, Path: "/healthz"},
 		{Method: http.MethodGet, Path: "/readyz"},
+		{Method: http.MethodGet, Path: "/metrics"},
 		{Method: http.MethodPost, Path: "/v1/tenants"},
 		{Method: http.MethodGet, Path: "/v1/projects", Auth: true},
 		{Method: http.MethodPost, Path: "/v1/projects", Auth: true},
@@ -178,12 +193,19 @@ func APIRoutes() []Route {
 func (s *Server) routes(mux *http.ServeMux) {
 	for _, route := range APIRoutes() {
 		route := route
+		if route.Path == "/metrics" && s.metrics == nil {
+			// Disabled by configuration: no stub route, requests fall to the
+			// catch-all and get the uniform not-found problem (ADR-0014).
+			continue
+		}
 		var handler http.HandlerFunc
 		switch {
 		case route.Path == "/healthz":
 			handler = s.handleHealth
 		case route.Path == "/readyz":
 			handler = s.handleReady
+		case route.Path == "/metrics":
+			handler = promhttp.HandlerFor(s.metrics.Registry(), promhttp.HandlerOpts{}).ServeHTTP
 		default:
 			switch route.Path {
 			case "/v1/tenants":
@@ -222,19 +244,22 @@ func (s *Server) routes(mux *http.ServeMux) {
 				panic(fmt.Sprintf("route %s %s has no handler mapping", route.Method, route.Path))
 			}
 		}
-		mux.Handle(route.Method+" "+route.Path, s.wrap(handler, route.Auth))
+		mux.Handle(route.Method+" "+route.Path, s.wrap(handler, route.Auth, route.Path))
 	}
 	// Catch-all: unknown paths get RFC 9457 problems instead of net/http's
 	// plain-text default.
 	mux.Handle("/", s.wrap(func(w http.ResponseWriter, r *http.Request) {
 		writeProblem(w, r, domain.NotFoundf("route", r.URL.Path))
-	}, false))
+	}, false, metrics.RouteUnmatched))
 }
 
 // wrap applies the middleware chain; authenticated routes resolve their
-// principal before any handler code runs.
-func (s *Server) wrap(next http.HandlerFunc, requiresAuth bool) http.Handler {
-	return s.recoverPanics(s.withRequestLog(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+// principal before any handler code runs. The route label feeds request
+// metrics with the pinned pattern, never the raw path (ADR-0014). Panic
+// recovery sits inside the request log so a recovered 500 is still observed
+// and logged with its real status.
+func (s *Server) wrap(next http.HandlerFunc, requiresAuth bool, route string) http.Handler {
+	return s.withRequestLog(route, s.recoverPanics(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if requiresAuth {
 			principal, derr := s.auth.Authenticate(r)
 			if derr != nil {

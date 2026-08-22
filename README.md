@@ -15,7 +15,7 @@ outbox), runs are dispatched through tenant-scoped run claims with fencing and
 bounded retries by a process-level worker, and the server exposes honest
 readiness, loopback-confined dev auth, and bounded HTTP lifecycles.
 
-Read the [master plan](docs/MASTER_PLAN.md) for the complete product and implementation strategy. The condensed [resources index](docs/RESOURCES.md) links directly to the repositories, documentation, papers, and product research that accelerate development. Architecture decisions live in [docs/adr](docs/adr); the current implementation state and its proof matrix live in [docs/TRANCHE_2_FINAL_EVIDENCE.md](docs/TRANCHE_2_FINAL_EVIDENCE.md) (with per-tranche records alongside).
+Read the [master plan](docs/MASTER_PLAN.md) for the complete product and implementation strategy. The condensed [resources index](docs/RESOURCES.md) links directly to the repositories, documentation, papers, and product research that accelerate development. Architecture decisions live in [docs/adr](docs/adr); the current implementation state and its proof matrix live in [docs/TRANCHE_2_FINAL_EVIDENCE.md](docs/TRANCHE_2_FINAL_EVIDENCE.md), with per-tranche records alongside (latest: [Tranche 3.1 metrics platform](docs/TRANCHE_3_1_EVIDENCE.md)).
 
 ## Quick start
 
@@ -32,6 +32,10 @@ Serve the HTTP API locally:
 ./bin/ants serve --config config/ants.example.yaml
 curl -s localhost:8080/healthz
 ```
+
+The process also exposes Prometheus metrics at `/metrics` on the same
+listener (aggregate operational series with fixed-vocabulary labels; disable
+with `metrics.enabled: false`, see ADR-0014).
 
 The API is specified by [openapi/v1/openapi.yaml](openapi/v1/openapi.yaml); TypeScript types are generated into `packages/contracts`.
 
