@@ -99,6 +99,13 @@ worker:
   # ones, so leave headroom for deploy churn.
   max_attempts: 3
 
+metrics:
+  # Prometheus exposition at /metrics on the API listener (ADR-0014).
+  # Enabled by default so an operable system measures itself; series carry
+  # fixed-vocabulary labels only (route patterns, statuses, states) and no
+  # tenant or resource identifiers. Set false to remove the route entirely.
+  enabled: true
+
 log:
   level: info
   format: text

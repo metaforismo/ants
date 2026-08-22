@@ -26,6 +26,18 @@ dependencies:
       driver). The planned domain-store adapter uses the same driver.
     notes: Reference PostgreSQL driver for Go per master plan section 14.6.
 
+  - module: github.com/prometheus/client_golang
+    version: v1.24.1
+    license: Apache-2.0
+    decision: adopt
+    purpose: Prometheus instrumentation and text exposition for the API
+      edge, outbox dispatcher, and run worker (ADR-0014). Instance-owned
+      registry served at /metrics behind metrics.enabled.
+    notes: De-facto Go instrumentation standard per master plan OSS atlas
+      section 14.6; Apache-2.0 satisfies ADR-0008. OpenTelemetry remains a
+      later wave and can scrape this registry, so the choice is not
+      foreclosed.
+
   - module: openapi-typescript (npm, packages/contracts devDependency)
     version: 7.13.0
     license: MIT

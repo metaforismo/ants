@@ -38,6 +38,31 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/metrics": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Prometheus metrics exposition
+         * @description Aggregate operational metrics for this process (HTTP edge, outbox
+         *     dispatcher, run worker, Go runtime) in Prometheus text exposition
+         *     format. Served only when `metrics.enabled` is true in the server
+         *     configuration; otherwise the route does not exist. Labels carry
+         *     fixed vocabularies only and never include tenant or resource
+         *     identifiers.
+         */
+        get: operations["getMetrics"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/v1/tenants": {
         parameters: {
             query?: never;
@@ -588,6 +613,26 @@ export interface operations {
                 };
             };
             503: components["responses"]["Problem"];
+        };
+    };
+    getMetrics: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Prometheus text exposition of the current metric set */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "text/plain": string;
+                };
+            };
         };
     };
     createTenant: {

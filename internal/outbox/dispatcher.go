@@ -20,6 +20,17 @@ type Sink interface {
 	Deliver(ctx context.Context, msg ports.OutboxMessage) error
 }
 
+// Observer receives dispatch outcomes for instrumentation (ADR-0014).
+// Implementations must be cheap and non-blocking: they run inline in the
+// dispatch loop. A nil observer disables instrumentation only.
+type Observer interface {
+	RoundLeased(leased int)
+	OutboxStates(states ports.OutboxStats)
+	Delivered()
+	RetryScheduled()
+	DeadLettered()
+}
+
 // Config bounds dispatcher behavior. All values are validated.
 type Config struct {
 	BatchSize        int
@@ -51,11 +62,13 @@ type Dispatcher struct {
 	logger   *slog.Logger
 	cfg      Config
 	workerID string
+	obs      Observer
 }
 
 // New builds a dispatcher over one outbox store. Scheduling time is owned by
-// that store's clock (ADR-0011), not by the dispatcher.
-func New(store ports.OutboxStore, sink Sink, logger *slog.Logger, cfg Config, workerID string) (*Dispatcher, error) {
+// that store's clock (ADR-0011), not by the dispatcher. The observer may be
+// nil when instrumentation is disabled.
+func New(store ports.OutboxStore, sink Sink, logger *slog.Logger, cfg Config, workerID string, obs Observer) (*Dispatcher, error) {
 	if store == nil || sink == nil || logger == nil {
 		return nil, fmt.Errorf("outbox: store, sink and logger are required")
 	}
@@ -64,7 +77,7 @@ func New(store ports.OutboxStore, sink Sink, logger *slog.Logger, cfg Config, wo
 	}
 	return &Dispatcher{
 		store: store, sink: sink, logger: logger,
-		cfg: cfg, workerID: workerID,
+		cfg: cfg, workerID: workerID, obs: obs,
 	}, nil
 }
 
@@ -95,6 +108,14 @@ func (d *Dispatcher) DispatchOnce(ctx context.Context) (int, error) {
 	if err != nil {
 		return 0, err
 	}
+	if d.obs != nil {
+		d.obs.RoundLeased(len(leased))
+		if states, statsErr := d.store.Stats(ctx); statsErr != nil {
+			d.logger.Warn("outbox stats refresh failed", "error", safeErr(statsErr))
+		} else {
+			d.obs.OutboxStates(states)
+		}
+	}
 	for _, msg := range leased {
 		deliverCtx, cancel := context.WithTimeout(ctx, d.cfg.Lease)
 		deliverErr := d.sink.Deliver(deliverCtx, msg)
@@ -104,6 +125,8 @@ func (d *Dispatcher) DispatchOnce(ctx context.Context) (int, error) {
 			if ackErr := d.store.MarkDelivered(ctx, msg.ID, d.workerID); ackErr != nil {
 				d.logger.Warn("outbox ack failed; message will redeliver",
 					"message_id", msg.ID, "error", safeErr(ackErr))
+			} else if d.obs != nil {
+				d.obs.Delivered()
 			}
 		case ctx.Err() != nil:
 			// Shutting down: leave the lease to expire so another worker
@@ -114,14 +137,23 @@ func (d *Dispatcher) DispatchOnce(ctx context.Context) (int, error) {
 			if failErr := d.store.FailWithBackoff(ctx, msg.ID, d.workerID, retryIn, safeErr(deliverErr)); failErr != nil {
 				d.logger.Error("outbox failure recording failed",
 					"message_id", msg.ID, "error", safeErr(failErr))
-			} else if msg.Attempts >= msg.MaxAttempts {
-				d.logger.Error("outbox message moved to dead-letter",
-					"message_id", msg.ID, "dedup_key", msg.DedupKey,
-					"attempts", msg.Attempts, "last_error", safeErr(deliverErr))
 			} else {
-				d.logger.Warn("outbox delivery failed; scheduled for retry",
-					"message_id", msg.ID, "attempt", msg.Attempts,
-					"retry_in", retryIn.String(), "error", safeErr(deliverErr))
+				switch {
+				case msg.Attempts >= msg.MaxAttempts:
+					d.logger.Error("outbox message moved to dead-letter",
+						"message_id", msg.ID, "dedup_key", msg.DedupKey,
+						"attempts", msg.Attempts, "last_error", safeErr(deliverErr))
+					if d.obs != nil {
+						d.obs.DeadLettered()
+					}
+				default:
+					d.logger.Warn("outbox delivery failed; scheduled for retry",
+						"message_id", msg.ID, "attempt", msg.Attempts,
+						"retry_in", retryIn.String(), "error", safeErr(deliverErr))
+					if d.obs != nil {
+						d.obs.RetryScheduled()
+					}
+				}
 			}
 		}
 	}

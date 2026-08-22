@@ -35,7 +35,7 @@ func (s *Server) recoverPanics(next http.Handler) http.Handler {
 	})
 }
 
-func (s *Server) withRequestLog(next http.Handler) http.Handler {
+func (s *Server) withRequestLog(route string, next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		started := time.Now()
 		rec := &statusRecorder{ResponseWriter: w, status: http.StatusOK}
@@ -49,7 +49,14 @@ func (s *Server) withRequestLog(next http.Handler) http.Handler {
 			}
 		}
 		w.Header().Set("X-Request-ID", requestID)
+		if s.metrics != nil {
+			s.metrics.HTTPInFlightInc()
+			defer s.metrics.HTTPInFlightDec()
+		}
 		next.ServeHTTP(rec, r)
+		if s.metrics != nil {
+			s.metrics.HTTPObserveRequest(r.Method, route, rec.status, time.Since(started))
+		}
 		s.log.Log(r.Context(), levelFor(rec.status), "http_request",
 			"method", r.Method,
 			"path", r.URL.Path,

@@ -32,6 +32,11 @@ networks.
 - The outbox dispatcher is single-process; multi-node delivery scale-out,
   dead-letter requeue/discard tooling, and outbox retention are deferred
   (ADR-0011, ADR-0013).
+- `/metrics` is unauthenticated by design like the health probes and serves
+  aggregate operational series only (fixed-vocabulary labels; no tenant,
+  resource, or principal identifiers). Deployments that must not expose it
+  can set `metrics.enabled: false`; an ACL'd admin listener is deferred
+  (ADR-0014).
 
 ## Reporting a vulnerability
 

@@ -77,12 +77,13 @@ func auditServer(t *testing.T, mutate func(r *ports.Repositories)) (*httptest.Se
 		mutate(&repos)
 	}
 	srv, err := server.New(server.Deps{
-		Config: cfg,
-		Repos:  repos,
-		Uow:    application.Uow,
-		Engine: application.Engine,
-		Logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
-		Ready:  func(context.Context) error { return nil },
+		Config:  cfg,
+		Repos:   repos,
+		Uow:     application.Uow,
+		Engine:  application.Engine,
+		Logger:  slog.New(slog.NewTextHandler(io.Discard, nil)),
+		Ready:   func(context.Context) error { return nil },
+		Metrics: application.Metrics,
 	})
 	if err != nil {
 		t.Fatalf("build server: %v", err)

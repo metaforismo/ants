@@ -83,6 +83,15 @@ func (c Config) Validate() error {
 	return nil
 }
 
+// Observer receives dispatch outcomes for instrumentation (ADR-0014).
+// Implementations must be cheap and non-blocking: they run inline on the
+// dispatch path. A nil observer disables instrumentation only.
+type Observer interface {
+	ClaimsAcquired(acquired int)
+	RunFinished(outcome string)
+	RunConverged(kind string)
+}
+
 type Worker struct {
 	claims ports.RunClaimStore
 	runs   ports.RunStore
@@ -90,13 +99,14 @@ type Worker struct {
 	logger *slog.Logger
 	cfg    Config
 	owner  string
+	obs    Observer
 }
 
 // New builds a run worker over one claim store. The owner identity must be
 // stable for the process lifetime (it fences every mutation the worker makes)
 // and unique among concurrently running workers; the composition root derives
 // it from hostname and pid, tests inject their own.
-func New(claims ports.RunClaimStore, runs ports.RunStore, exec Executor, logger *slog.Logger, cfg Config, owner string) (*Worker, error) {
+func New(claims ports.RunClaimStore, runs ports.RunStore, exec Executor, logger *slog.Logger, cfg Config, owner string, obs Observer) (*Worker, error) {
 	if claims == nil || runs == nil || exec == nil || logger == nil {
 		return nil, fmt.Errorf("worker: claims, runs, executor and logger are required")
 	}
@@ -106,7 +116,7 @@ func New(claims ports.RunClaimStore, runs ports.RunStore, exec Executor, logger 
 	if err := domain.ValidateClaimOwner(owner); err != nil {
 		return nil, fmt.Errorf("worker: owner identity: %w", err)
 	}
-	return &Worker{claims: claims, runs: runs, exec: exec, logger: logger, cfg: cfg, owner: owner}, nil
+	return &Worker{claims: claims, runs: runs, exec: exec, logger: logger, cfg: cfg, owner: owner, obs: obs}, nil
 }
 
 // Run claims and executes runs until ctx is cancelled. Returning implies all
@@ -143,6 +153,9 @@ func (w *Worker) ProcessOnce(ctx context.Context) (int, error) {
 	})
 	if err != nil {
 		return 0, err
+	}
+	if w.obs != nil && len(acquired) > 0 {
+		w.obs.ClaimsAcquired(len(acquired))
 	}
 
 	var wg sync.WaitGroup
@@ -297,6 +310,9 @@ func (w *Worker) disposeAfterExecution(ctx context.Context, ref ports.RunClaimRe
 		// Complete proves we still own the epoch; if the lease lapsed in the
 		// gap between the last heartbeat and completion, the guarded sweeper
 		// removes the leftover instead.
+		if w.obs != nil {
+			w.obs.RunFinished(string(run.Status))
+		}
 		if err := w.claims.Complete(cleanupCtx, ref); err != nil {
 			if cleanErr := w.claims.CleanupTerminal(cleanupCtx, ref.TenantID, ref.RunID); cleanErr != nil {
 				w.logger.Error("claim completion failed",
@@ -344,6 +360,9 @@ func (w *Worker) recoverInterrupted(ctx context.Context, ref ports.RunClaimRef, 
 			"tenant_id", string(ref.TenantID), "run_id", string(ref.RunID), "error", safeErr(err))
 		return
 	}
+	if w.obs != nil {
+		w.obs.RunConverged("interrupted")
+	}
 	w.cleanupTerminal(cleanupCtx, ref, "recovered interrupted run")
 }
 
@@ -365,6 +384,9 @@ func (w *Worker) convergeExhausted(ctx context.Context, ref ports.RunClaimRef, a
 	}
 	w.logger.Warn("run converged as exhausted after repeated failed dispatches",
 		"tenant_id", string(ref.TenantID), "run_id", string(ref.RunID), "attempts", attempts)
+	if w.obs != nil {
+		w.obs.RunConverged("exhausted")
+	}
 	w.cleanupTerminal(cleanupCtx, ref, "converged exhausted run")
 }
 

@@ -320,6 +320,13 @@ type testWorld struct {
 }
 
 func newTestWorld(t *testing.T, mutate func(*Config)) *testWorld {
+	return newTestWorldFull(t, mutate, nil)
+}
+
+// newTestWorldFull builds the standard world with an explicit observer
+// (possibly nil), so observer tests drive the exact production dispatch
+// paths instead of a separate instrumented variant.
+func newTestWorldFull(t *testing.T, mutate func(*Config), obs Observer) *testWorld {
 	t.Helper()
 	cfg := testConfig()
 	if mutate != nil {
@@ -365,7 +372,7 @@ func newTestWorld(t *testing.T, mutate func(*Config)) *testWorld {
 		t: t, repos: repos, clock: clock, exec: exec, watch: watch,
 		tenantID: tenant.ID, threadID: thread.ID,
 	}
-	w.worker, err = New(watch, repos.Runs, exec, testLogger(), cfg, testOwner)
+	w.worker, err = New(watch, repos.Runs, exec, testLogger(), cfg, testOwner, obs)
 	if err != nil {
 		t.Fatalf("build worker: %v", err)
 	}
@@ -511,7 +518,7 @@ func awaitRound(t *testing.T, done <-chan error) {
 func TestNewRejectsMissingDependenciesAndBadIdentity(t *testing.T) {
 	cfg := testConfig()
 	logger := testLogger()
-	if _, err := New(nil, nil, nil, logger, cfg, testOwner); err == nil {
+	if _, err := New(nil, nil, nil, logger, cfg, testOwner, nil); err == nil {
 		t.Fatal("missing dependencies must be rejected")
 	}
 	// Both fields are individually legal, but one heartbeat margin leaves a
@@ -519,10 +526,10 @@ func TestNewRejectsMissingDependenciesAndBadIdentity(t *testing.T) {
 	badCfg := cfg
 	badCfg.Lease = time.Second
 	badCfg.HeartbeatEvery = 500 * time.Millisecond
-	if _, err := New(&beatWatcher{}, nil, nil, logger, badCfg, testOwner); err == nil {
+	if _, err := New(&beatWatcher{}, nil, nil, logger, badCfg, testOwner, nil); err == nil {
 		t.Fatal("config without heartbeat margin must be rejected")
 	}
-	if _, err := New(&beatWatcher{}, nil, nil, logger, cfg, ""); err == nil {
+	if _, err := New(&beatWatcher{}, nil, nil, logger, cfg, "", nil); err == nil {
 		t.Fatal("empty owner identity must be rejected")
 	}
 }
@@ -1018,7 +1025,7 @@ func TestUnreadableRunLeavesClaimToExpireForRetry(t *testing.T) {
 	w := newTestWorld(t, nil)
 	run := w.seedRun("unreadable")
 	wrk, err := New(w.watch, &flakyRunStore{RunStore: w.repos.Runs, failFor: run.ID},
-		w.exec, testLogger(), testConfig(), "second-owner")
+		w.exec, testLogger(), testConfig(), "second-owner", nil)
 	if err != nil {
 		t.Fatal(err)
 	}

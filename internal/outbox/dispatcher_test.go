@@ -95,13 +95,18 @@ func newTestWorld(t *testing.T, sink Sink) (*Dispatcher, ports.Repositories, *st
 
 func newTestWorldWithConfig(t *testing.T, sink Sink, cfg Config) (*Dispatcher, ports.Repositories, *storetest.AdvancingClock) {
 	t.Helper()
+	return newTestWorldWithObserver(t, sink, cfg, nil)
+}
+
+func newTestWorldWithObserver(t *testing.T, sink Sink, cfg Config, obs Observer) (*Dispatcher, ports.Repositories, *storetest.AdvancingClock) {
+	t.Helper()
 	clock := storetest.NewAdvancingClock()
 	repos, err := memorystore.NewReposWithOptions(memorystore.Options{Clock: clock})
 	if err != nil {
 		t.Fatalf("memory repos: %v", err)
 	}
 	d, err := New(repos.Outbox, sink, testLogger(), cfg,
-		fmt.Sprintf("test-%d", time.Now().UnixNano()))
+		fmt.Sprintf("test-%d", time.Now().UnixNano()), obs)
 	if err != nil {
 		t.Fatalf("dispatcher: %v", err)
 	}
@@ -273,7 +278,7 @@ func TestConcurrentDispatchersPartitionWork(t *testing.T) {
 		d, err := New(repos.Outbox, sink, testLogger(), Config{
 			BatchSize: 5, Interval: time.Minute, Lease: time.Hour,
 			MaxAttempts: 3, RetryBackoffBase: time.Second,
-		}, fmt.Sprintf("w%d", w))
+		}, fmt.Sprintf("w%d", w), nil)
 		if err != nil {
 			t.Fatal(err)
 		}

@@ -11,6 +11,7 @@ import (
 	"os"
 
 	"github.com/metaforismo/ants/internal/config"
+	"github.com/metaforismo/ants/internal/metrics"
 	"github.com/metaforismo/ants/internal/orchestration"
 	"github.com/metaforismo/ants/internal/outbox"
 	"github.com/metaforismo/ants/internal/planner"
@@ -37,6 +38,10 @@ type App struct {
 	Seeder  orchestration.Seeder
 	Outbox  *outbox.Dispatcher
 	Worker  *worker.Worker
+	// Metrics is the Prometheus collector behind /metrics and the observer
+	// of the outbox dispatcher and run worker; nil when metrics are disabled
+	// by configuration (ADR-0014).
+	Metrics *metrics.Metrics
 	// Ready reports whether backing dependencies can serve traffic; the API
 	// server exposes it behind /readyz. The memory store has no external
 	// dependency, so its check is trivially satisfied.
@@ -85,6 +90,13 @@ func Build(cfg config.Config, logOut io.Writer) (*App, error) {
 	clock := ports.SystemClock{}
 	ids := ports.RandomIDs{}
 	sleeper := ports.WallSleeper{}
+
+	// One collector instruments the HTTP edge, the outbox dispatcher, and the
+	// run worker (ADR-0014); nil when metrics are disabled by configuration.
+	var collector *metrics.Metrics
+	if cfg.Metrics.Enabled {
+		collector = metrics.New()
+	}
 
 	pol := policy.NewEngine(cfg.Policy.AllowLocalCommits, clock, ids, repos.PolicyDecisions, repos.Audit)
 
@@ -151,7 +163,7 @@ func Build(cfg config.Config, logOut io.Writer) (*App, error) {
 			MaxAttempts:      cfg.Outbox.MaxAttempts,
 			RetryBackoffBase: cfg.Outbox.RetryBackoffBase.Duration,
 		},
-		nodeID)
+		nodeID, collector)
 	if derr != nil {
 		return nil, fmt.Errorf("app: wire outbox dispatcher: %w", derr)
 	}
@@ -168,7 +180,7 @@ func Build(cfg config.Config, logOut io.Writer) (*App, error) {
 			Concurrency:    cfg.Worker.Concurrency,
 			MaxAttempts:    cfg.Worker.MaxAttempts,
 		},
-		nodeID)
+		nodeID, collector)
 	if werr != nil {
 		return nil, fmt.Errorf("app: wire run worker: %w", werr)
 	}
@@ -185,6 +197,7 @@ func Build(cfg config.Config, logOut io.Writer) (*App, error) {
 		Seeder:  seeder{},
 		Outbox:  dispatcher,
 		Worker:  runWorker,
+		Metrics: collector,
 		Ready:   ready,
 	}, nil
 }
