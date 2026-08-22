@@ -1,4 +1,4 @@
-# Tranche 3 / PR D1 — Durable run claims (storage aggregate): evidence record
+# Tranche 2 / PR D1 — Durable run claims (aggregate + StartRun wiring): evidence record
 
 Date: 2026-08-22
 Branch: `feat/run-claims` → PR D1 (against `main`)
@@ -11,7 +11,8 @@ that was not executed is recorded as BLOCKED/NOT RUN, not as PASS.
 
 ## Scope
 
-Storage-level run-claim aggregate per ADR-0012 part 1:
+Durable run claims per ADR-0012 part 1 — storage aggregate plus StartRun
+wiring:
 
 - `internal/domain/runclaim.go` — `RunClaim` aggregate, closed
   `runnable ⇄ claimed` transition table (wired into the shared consistency
@@ -39,8 +40,17 @@ Storage-level run-claim aggregate per ADR-0012 part 1:
 - Shared deterministic suite `storetest.RunRunClaims` (14 subtests) run
   identically against memory and disposable real PostgreSQL on an advancing
   manual clock — zero sleeps.
-- ADR-0012 (part 1). Worker goroutines, engine handoff, server lifecycle and
-  worker config are explicitly deferred to PR D2.
+- Engine wiring (composition boundary): `orchestration.Deps` gains a required
+  `RunClaims` port — no optional nil dependency, no fallback. `StartRun`
+  creates the initial runnable claim inside the same unit of work as the run
+  insert and before the thread transition; a successful start returns with
+  exactly one claim, an idempotent replay never duplicates it, and any
+  claim-create or later thread/event/outbox failure rolls back run + claim +
+  transitions atomically. Proven by focused engine tests
+  (`internal/orchestration/startrun_claims_test.go`) that inject failures at
+  the real composition boundary.
+- ADR-0012 (part 1). Worker goroutines, acquisition-driven execution handoff,
+  server lifecycle and worker config are explicitly deferred to PR D2.
 
 ## Gate results
 
@@ -49,11 +59,15 @@ Storage-level run-claim aggregate per ADR-0012 part 1:
 | 1 | Format | `gofmt -l .` | **PASS** (no output) |
 | 2 | Vet + static analysis | inside `make ci` (`go vet ./...`, staticcheck 2026.2.1) | **PASS** |
 | 3 | Full CI gate | `make ci` (fmt-check, vet, lint, tidy-check, manifest-check, test, test-race, build, contracts-test, contracts-drift) | **PASS** (exit 0) |
-| 4 | Focused claim tests (race) | `go test -race -count=1 -run 'TestMemoryRunClaimContract\|TestRunClaim\|…' ./internal/store/storetest/ ./internal/domain/` | **PASS** |
+| 4 | Focused claim tests (engine boundary + stores) | `go test -count=1 ./internal/orchestration/ ./internal/store/storetest/ ./internal/domain/` incl. `TestStartRunCreatesExactlyOneRunnableClaim`, `TestIdempotentReplayDoesNotDuplicateClaim`, `TestStartRunRollsBackRunAndClaimAtomically` (failure injected at claim-create / thread-update / event-append inside the real StartRun unit) | **PASS** |
 | 5 | All unit + contract tests | `go test ./...` | **PASS** |
-| 6 | Race detector, whole repo | `go test -race ./...` (inside make ci) | **PASS** |
-| 7 | Migrations + both contract suites vs real PostgreSQL | `./scripts/test-postgres.sh` (race mode, disposable container, fresh DB per test binary) | **PASS** — migrate 0001→0006 ok; `TestPostgresStoreContract` incl. `RunOutbox` + `RunRunClaims` ok |
+| 6 | Race detector, whole repo | `go test -race -count=1 ./...` | **PASS** |
+| 7 | Migrations + both contract suites vs real PostgreSQL | `./scripts/test-postgres.sh` (race mode, disposable postgres:16-alpine container, fresh DB per test binary) | **PASS** — migrate 0001→0006 ok; `TestPostgresStoreContract` incl. `RunOutbox` + `RunRunClaims` ok |
 | 8 | Demo vertical slice | `make demo` | **PASS** — ready_for_review=true, budget tasks 2/8 exec-ops 5/64 |
+
+Gate results are from the follow-up commit that wires `StartRun` claim
+creation and renames this file from the inaccurate
+`docs/TRANCHE_3_EVIDENCE.md`; every check was re-run after that change.
 
 ## Behaviors pinned by the new suite (both adapters)
 
@@ -96,8 +110,9 @@ Storage-level run-claim aggregate per ADR-0012 part 1:
 
 ## Honest limitations of this tranche
 
-1. Nothing acquires claims yet in production paths: worker loops, engine
-   handoff, heartbeat policy, config surface and lifecycle wiring are PR D2
+1. Claims are created by `StartRun` but nothing acquires them yet in
+   production paths: worker loops, acquisition-driven execution handoff,
+   heartbeat policy, config surface and lifecycle wiring are PR D2
    (ADR-0012 part 2).
 2. `attempts` is observational (counts acquisitions); retry caps belong to
    engine policy in part 2.

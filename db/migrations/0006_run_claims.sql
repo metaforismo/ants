@@ -1,4 +1,4 @@
--- Tranche 3 / PR D1: durable run claims (ADR-0012, part 1).
+-- Tranche 2 / PR D1: durable run claims (ADR-0012, part 1).
 --
 -- One row per run holds its execution lease. Ownership lives here, never in
 -- runs.status: claiming, expiry and fencing must not interfere with the run

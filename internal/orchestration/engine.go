@@ -45,6 +45,7 @@ type Deps struct {
 	Workspaces ports.WorkspaceStore
 	Artifacts  ports.ArtifactStore
 	Events     ports.EventLog
+	RunClaims  ports.RunClaimStore
 
 	// Uow makes multi-record transitions (state + event, run + thread) commit
 	// atomically; every adapter supplies it.
@@ -72,7 +73,8 @@ type Engine struct {
 
 func New(deps Deps, cfg Config) (*Engine, error) {
 	if deps.Threads == nil || deps.Projects == nil || deps.Specs == nil || deps.Tasks == nil ||
-		deps.Runs == nil || deps.Workspaces == nil || deps.Artifacts == nil || deps.Events == nil {
+		deps.Runs == nil || deps.Workspaces == nil || deps.Artifacts == nil || deps.Events == nil ||
+		deps.RunClaims == nil {
 		return nil, fmt.Errorf("orchestration: all persistence stores are required")
 	}
 	if deps.Policy == nil || deps.Planner == nil || deps.Reviewer == nil || deps.Seeder == nil ||
@@ -161,9 +163,14 @@ func (e *Engine) StartRun(ctx context.Context, in StartInput) (*StartResult, err
 		if createErr = e.deps.Runs.Create(ctx, created); createErr != nil {
 			return createErr
 		}
+		// The initial runnable claim commits with its run (ADR-0012): a run
+		// without a claim could never be dispatched, so the pair is born —
+		// and rolls back — together. Thread moves to planning inside the same
+		// unit so a replayed or failed start never leaves a half-open thread.
+		if createErr = e.deps.RunClaims.Create(ctx, created.TenantID, created.ID); createErr != nil {
+			return createErr
+		}
 		run = created
-		// Thread moves to planning inside the same unit so a replayed or
-		// failed start never leaves a half-open thread.
 		return e.transitionThreadWithData(ctx, thread, domain.ThreadPlanning, nil)
 	})
 	if err != nil {

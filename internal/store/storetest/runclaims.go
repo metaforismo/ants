@@ -189,7 +189,6 @@ func testClaimCreationAtomic(t *testing.T, repos ports.Repositories, tx ports.Tr
 		if cErr := repos.Runs.Create(ctx, run); cErr != nil {
 			return cErr
 		}
-		doomed = run
 		if cErr := repos.RunClaims.Create(ctx, tenantID, run.ID); cErr != nil {
 			return cErr
 		}

@@ -54,10 +54,12 @@ owns exactly one injected `ports.Clock`. Public signatures take durations
 with saturating arithmetic (`domain.ClaimExpiry`) against the store clock.
 
 **Atomic creation.** `Create` inserts the initial runnable claim inside the
-caller's unit of work (ADR-0010): the claim comes into existence atomically
-with `StartRun`'s run insert, and a rolled-back unit leaves no claim — nor
-any event/outbox partial state from the same unit. Worker-side wiring into
-`StartRun` lands in part 2.
+caller's unit of work (ADR-0010): the engine's `StartRun` creates it in the
+same unit as its run insert, before the thread transition, so every
+successful start yields exactly one claim, an idempotent replay never
+duplicates one, and a rolled-back unit leaves no claim — nor any event/outbox
+partial state from the same unit. Worker-side acquisition of those claims
+lands in part 2.
 
 **Bounded dispatch.** `AcquireNext(limit)` claims runnable-or-expired rows in
 deterministic `(created_at, run_id)` order. PostgreSQL implements each claim
@@ -81,8 +83,9 @@ release history preservation, fenced completion, guarded idempotent cleanup,
 rollback leaving no claim/event/outbox row, nested-unit joining, ordering,
 and typed validation.
 
-Explicitly deferred to **part 2** (PR D2): worker loops, engine handoff,
-heartbeat scheduling policy, configuration surface, server lifecycle.
+Explicitly deferred to **part 2** (PR D2): worker loops,
+acquisition-driven execution handoff, heartbeat scheduling policy,
+configuration surface, server lifecycle.
 
 ## Consequences
 

@@ -436,7 +436,7 @@ func TestEngineRejectsInvalidDriverPairing(t *testing.T) {
 	_, err := New(Deps{
 		Threads: h.repos.Threads, Projects: h.repos.Projects, Specs: h.repos.Specs,
 		Tasks: h.repos.Tasks, Runs: h.repos.Runs, Workspaces: h.repos.Workspaces,
-		Artifacts: h.repos.Artifacts, Events: h.repos.Events,
+		Artifacts: h.repos.Artifacts, Events: h.repos.Events, RunClaims: h.repos.RunClaims,
 		Uow:      h.repos.NewTransactor(),
 		Policy:   pol,
 		Sandbox:  sandbox.NewFakeDriver(),
@@ -462,6 +462,13 @@ func TestEngineRejectsInvalidDriverPairing(t *testing.T) {
 	}
 	if _, err := New(missing, validConfig()); err == nil {
 		t.Fatalf("engine without planner must fail construction")
+	}
+
+	noClaims := missing
+	noClaims.Planner = planner.NewDeterministic()
+	// RunClaims deliberately omitted.
+	if _, err := New(noClaims, validConfig()); err == nil {
+		t.Fatalf("engine without run claims must fail construction")
 	}
 }
 
