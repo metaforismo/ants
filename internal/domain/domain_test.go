@@ -26,6 +26,7 @@ func TestTransitionTablesAreInternallyConsistent(t *testing.T) {
 		{"spec", func() error { return checkTransitionTable(AllSpecStatuses, specTransitions) }},
 		{"workspace", func() error { return checkTransitionTable(AllWorkspaceStatuses, workspaceTransitions) }},
 		{"connection", func() error { return checkTransitionTable(AllConnectionStatuses, connectionTransitions) }},
+		{"run_claim", func() error { return checkTransitionTable(AllRunClaimStatuses, runClaimTransitions) }},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			if err := tt.check(); err != nil {

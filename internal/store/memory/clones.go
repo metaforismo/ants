@@ -94,6 +94,23 @@ func cloneIntegration(c *domain.IntegrationConnection) *domain.IntegrationConnec
 	return &out
 }
 
+func cloneRunClaim(c *domain.RunClaim) *domain.RunClaim {
+	out := *c
+	if c.AcquiredAt != nil {
+		ts := *c.AcquiredAt
+		out.AcquiredAt = &ts
+	}
+	if c.HeartbeatAt != nil {
+		ts := *c.HeartbeatAt
+		out.HeartbeatAt = &ts
+	}
+	if c.ExpiresAt != nil {
+		ts := *c.ExpiresAt
+		out.ExpiresAt = &ts
+	}
+	return &out
+}
+
 func cloneEvent(e *domain.Event) *domain.Event {
 	out := *e
 	if e.Data != nil {

@@ -28,6 +28,7 @@ type stateBackup struct {
 	outbox        []*outboxMessage
 	outboxByID    map[string]*outboxMessage
 	outboxByDedup map[string]*outboxMessage
+	runClaims     map[domain.RunID]*domain.RunClaim
 	eventSeq      int64
 }
 
@@ -56,6 +57,7 @@ func (st *storeState) backup() *stateBackup {
 		outbox:        make([]*outboxMessage, len(st.outbox)),
 		outboxByID:    make(map[string]*outboxMessage, len(st.outboxByID)),
 		outboxByDedup: make(map[string]*outboxMessage, len(st.outboxByDedup)),
+		runClaims:     make(map[domain.RunID]*domain.RunClaim, len(st.runClaims)),
 		eventSeq:      st.eventSeq,
 	}
 	copy(b.outbox, st.outbox)
@@ -64,6 +66,9 @@ func (st *storeState) backup() *stateBackup {
 	}
 	for k, v := range st.outboxByDedup {
 		b.outboxByDedup[k] = v
+	}
+	for k, v := range st.runClaims {
+		b.runClaims[k] = cloneRunClaim(v)
 	}
 	for k, v := range st.tenants {
 		b.tenants[k] = cloneTenant(v)
@@ -216,6 +221,12 @@ func (st *storeState) restore(b *stateBackup) {
 		freshOutboxByDedup[k] = v
 	}
 	st.outboxByDedup = freshOutboxByDedup
+
+	freshRunClaims := make(map[domain.RunID]*domain.RunClaim, len(b.runClaims))
+	for k, v := range b.runClaims {
+		freshRunClaims[k] = v
+	}
+	st.runClaims = freshRunClaims
 
 	st.eventSeq = b.eventSeq
 }

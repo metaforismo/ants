@@ -96,6 +96,7 @@ func Build(cfg config.Config, logOut io.Writer) (*App, error) {
 		Workspaces: repos.Workspaces,
 		Artifacts:  repos.Artifacts,
 		Events:     repos.Events,
+		RunClaims:  repos.RunClaims,
 		Uow:        transactor,
 		Policy:     pol,
 		Sandbox:    sandboxDriver,

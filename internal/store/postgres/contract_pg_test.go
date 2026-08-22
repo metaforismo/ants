@@ -26,4 +26,11 @@ func TestPostgresStoreContract(t *testing.T) {
 		w.truncateAll(t)
 		return storetest.World{Repos: w.Repos, Tx: w.Store, Advance: w.Advance}
 	})
+
+	// The run-claim contract exercises fencing, expiry reclaim, SKIP LOCKED
+	// dispatch, and unit-of-work atomicity on the same advancing clock.
+	storetest.RunRunClaims(t, func() storetest.World {
+		w.truncateAll(t)
+		return storetest.World{Repos: w.Repos, Tx: w.Store, Advance: w.Advance}
+	})
 }

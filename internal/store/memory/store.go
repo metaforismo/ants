@@ -21,6 +21,8 @@ var (
 	_ ports.PolicyDecisionStore = (*PolicyDecisionRepository)(nil)
 	_ ports.IntegrationStore    = (*IntegrationRepository)(nil)
 	_ ports.EventLog            = (*EventRepository)(nil)
+	_ ports.OutboxStore         = (*OutboxRepository)(nil)
+	_ ports.RunClaimStore       = (*RunClaimRepository)(nil)
 )
 
 // Repos is the collection of deterministic store implementations. Every
@@ -42,6 +44,7 @@ type Repos struct {
 	Integrations    *IntegrationRepository
 	Events          *EventRepository
 	Outbox          *OutboxRepository
+	RunClaims       *RunClaimRepository
 }
 
 // defaultOutboxMaxAttempts mirrors config.Defaults().Outbox.MaxAttempts so
@@ -103,6 +106,7 @@ func NewReposWithOptions(opts Options) (*Repos, error) {
 		integrations:      map[domain.IntegrationID]*domain.IntegrationConnection{},
 		outboxByID:        map[string]*outboxMessage{},
 		outboxByDedup:     map[string]*outboxMessage{},
+		runClaims:         map[domain.RunID]*domain.RunClaim{},
 	}
 	return &Repos{
 		st:              st,
@@ -119,6 +123,7 @@ func NewReposWithOptions(opts Options) (*Repos, error) {
 		Integrations:    &IntegrationRepository{st: st},
 		Events:          &EventRepository{st: st},
 		Outbox:          &OutboxRepository{st: st},
+		RunClaims:       &RunClaimRepository{st: st},
 	}, nil
 }
 
@@ -157,6 +162,7 @@ type storeState struct {
 	outbox        []*outboxMessage
 	outboxByID    map[string]*outboxMessage
 	outboxByDedup map[string]*outboxMessage
+	runClaims     map[domain.RunID]*domain.RunClaim
 
 	eventSeq int64
 }
@@ -198,5 +204,6 @@ func (r *Repos) AsPorts() ports.Repositories {
 		Integrations:    r.Integrations,
 		Events:          r.Events,
 		Outbox:          r.Outbox,
+		RunClaims:       r.RunClaims,
 	}
 }
