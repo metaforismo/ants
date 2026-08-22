@@ -36,6 +36,10 @@ type App struct {
 	Seeder  orchestration.Seeder
 	Outbox  *outbox.Dispatcher
 	Worker  *worker.Worker
+	// Ready reports whether backing dependencies can serve traffic; the API
+	// server exposes it behind /readyz. The memory store has no external
+	// dependency, so its check is trivially satisfied.
+	Ready func(ctx context.Context) error
 }
 
 // Build wires every component from cfg. Store mode postgres is rejected with
@@ -47,12 +51,14 @@ func Build(cfg config.Config, logOut io.Writer) (*App, error) {
 	var (
 		repos      ports.Repositories
 		transactor ports.Transactor
+		ready      func(ctx context.Context) error
 	)
 	switch cfg.Store.Mode {
 	case config.StoreModeMemory:
 		mem := memorystore.NewRepos()
 		repos = mem.AsPorts()
 		transactor = mem.NewTransactor()
+		ready = func(context.Context) error { return nil }
 	case config.StoreModePostgres:
 		poolCfg := cfg.Store.PostgresPool
 		pgStore, pgErr := postgres.New(context.Background(), postgres.Options{
@@ -67,6 +73,7 @@ func Build(cfg config.Config, logOut io.Writer) (*App, error) {
 		}
 		repos = pgStore.Repositories()
 		transactor = pgStore
+		ready = pgStore.Ping
 	default:
 		return nil, fmt.Errorf("app: store.mode %q is not supported", cfg.Store.Mode)
 	}
@@ -158,6 +165,7 @@ func Build(cfg config.Config, logOut io.Writer) (*App, error) {
 			HeartbeatEvery: cfg.Worker.HeartbeatEvery.Duration,
 			CleanupTimeout: cfg.Worker.CleanupTimeout.Duration,
 			Concurrency:    cfg.Worker.Concurrency,
+			MaxAttempts:    cfg.Worker.MaxAttempts,
 		},
 		nodeID)
 	if werr != nil {
@@ -175,6 +183,7 @@ func Build(cfg config.Config, logOut io.Writer) (*App, error) {
 		Seeder:  seeder{},
 		Outbox:  dispatcher,
 		Worker:  runWorker,
+		Ready:   ready,
 	}, nil
 }
 

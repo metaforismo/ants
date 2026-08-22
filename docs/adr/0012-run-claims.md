@@ -151,8 +151,9 @@ environment-overridable via `ANTS_WORKER_*`.
   writes everywhere else; the storage layer enforces credentials but cannot
   fence VMs, so future side-effecting call sites must check the epoch the way
   `executeClaim` does.
-- Attempts is observational (reclaim counts), not a retry budget; retry caps
-  remain engine policy.
+- Attempts is observational (reclaim counts), not a retry budget; the
+  dispatch cap built on top of it landed with ADR-0013
+  (`worker.max_attempts` → exhausted-run convergence).
 - One latent bug surfaced by the new shared suite was fixed:
   `RunRepository.Update` on PostgreSQL nulled the NOT NULL `principal`
   column for principals saved as empty string.

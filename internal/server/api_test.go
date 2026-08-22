@@ -3,6 +3,7 @@ package server_test
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"strings"
 	"testing"
@@ -356,5 +357,41 @@ func TestHealthEndpoints(t *testing.T) {
 	status, _, _ = e.do(http.MethodGet, "/readyz", nil, "")
 	if status != http.StatusOK {
 		t.Fatalf("readyz: %d", status)
+	}
+}
+
+// TestReadyzFailsWhenDependencyUnavailable pins the readiness contract: a
+// failing dependency check is a transient 503 problem — never a silent 200 —
+// while liveness keeps answering so the process can still be probed.
+func TestReadyzFailsWhenDependencyUnavailable(t *testing.T) {
+	e := newEnv(t)
+	e.setReady(func(context.Context) error { return errors.New("database connection lost") })
+
+	status, _, raw := e.do(http.MethodGet, "/readyz", nil, "")
+	if status != http.StatusServiceUnavailable {
+		t.Fatalf("failing dependency must fail readiness with 503, got %d", status)
+	}
+	var problem struct {
+		Code string `json:"code"`
+	}
+	if err := json.Unmarshal(raw, &problem); err != nil || problem.Code != "store_unavailable" {
+		t.Fatalf("readiness failure must be a typed problem, got %s", raw)
+	}
+
+	status, _, _ = e.do(http.MethodGet, "/healthz", nil, "")
+	if status != http.StatusOK {
+		t.Fatalf("liveness must stay independent of dependency state, got %d", status)
+	}
+}
+
+func TestReadyzRecoversWhenDependencyReturns(t *testing.T) {
+	e := newEnv(t)
+	e.setReady(func(context.Context) error { return errors.New("database connection lost") })
+	if status, _, _ := e.do(http.MethodGet, "/readyz", nil, ""); status != http.StatusServiceUnavailable {
+		t.Fatalf("precondition: failing probe must return 503, got %d", status)
+	}
+	e.setReady(func(context.Context) error { return nil })
+	if status, _, _ := e.do(http.MethodGet, "/readyz", nil, ""); status != http.StatusOK {
+		t.Fatalf("readiness must recover without restart, got %d", status)
 	}
 }

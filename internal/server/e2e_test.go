@@ -26,6 +26,12 @@ type env struct {
 	tenantAS    string // slug of primary tenant
 	tenantBS    string // slug of isolation-check tenant
 	application *app.App
+	ready       *flippableReadiness
+}
+
+// setReady swaps the dependency verdict behind /readyz for this env.
+func (e *env) setReady(fn func(context.Context) error) {
+	e.ready.set(fn)
 }
 
 var suffixMu sync.Mutex
@@ -40,13 +46,46 @@ func uniqueSuffix() string {
 
 const testPrincipal = "prn_e2etestprincipal00000"
 
+// flippableReadiness lets tests drive the /readyz dependency verdict without
+// touching real infrastructure: the check is swapped atomically at runtime.
+type flippableReadiness struct {
+	mu sync.Mutex
+	fn func(context.Context) error
+}
+
+func (f *flippableReadiness) Check(ctx context.Context) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.fn == nil {
+		return nil
+	}
+	return f.fn(ctx)
+}
+
+func (f *flippableReadiness) set(fn func(context.Context) error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.fn = fn
+}
+
 func buildServer(t *testing.T, cfg config.Config, application *app.App) *httptest.Server {
+	t.Helper()
+	return buildServerWithReady(t, cfg, application, application.Ready)
+}
+
+func buildServerWithReady(
+	t *testing.T,
+	cfg config.Config,
+	application *app.App,
+	ready func(context.Context) error,
+) *httptest.Server {
 	t.Helper()
 	srv, err := server.New(server.Deps{
 		Config: cfg,
 		Repos:  application.Repos,
 		Engine: application.Engine,
 		Logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
+		Ready:  ready,
 	})
 	if err != nil {
 		t.Fatalf("build server: %v", err)
@@ -94,12 +133,13 @@ func newEnvWithRuntime(t *testing.T, withRuntime bool) *env {
 	cfg := config.Defaults()
 	cfg.Server.DevHeaderAuth = true
 	application := buildApp(t, cfg)
-	ts := buildServer(t, cfg, application)
+	ready := &flippableReadiness{}
+	ts := buildServerWithReady(t, cfg, application, ready.Check)
 	if withRuntime {
 		startRuntime(t, application)
 	}
 
-	e := &env{t: t, baseURL: ts.URL, application: application}
+	e := &env{t: t, baseURL: ts.URL, application: application, ready: ready}
 	var created map[string]any
 	e.doJSON(t, http.MethodPost, "/v1/tenants", "",
 		map[string]any{"slug": "acme-" + uniqueSuffix(), "name": "Acme"}, &created, 0)
