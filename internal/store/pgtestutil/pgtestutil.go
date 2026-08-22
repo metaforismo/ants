@@ -22,9 +22,9 @@ var counter int64
 // CI) always set it; skipping is only possible outside those environments.
 func DSN(t *testing.T) string {
 	t.Helper()
-	dsn := os.Getenv("ANTS_TEST_PG_DSN")
+	dsn := os.Getenv("TEST_PG_DSN")
 	if dsn == "" {
-		t.Skip("ANTS_TEST_PG_DSN not set; canonical validation provides a disposable PostgreSQL via scripts/test-postgres.sh or CI")
+		t.Skip("TEST_PG_DSN not set; canonical validation provides a disposable PostgreSQL via scripts/test-postgres.sh or CI")
 	}
 	return dsn
 }

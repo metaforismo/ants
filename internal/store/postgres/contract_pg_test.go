@@ -19,7 +19,7 @@ import (
 )
 
 // TestPostgresStoreContract runs the exact behavioral assertions the memory
-// adapter satisfies against real PostgreSQL. It is gated on ANTS_TEST_PG_DSN
+// adapter satisfies against real PostgreSQL. It is gated on TEST_PG_DSN
 // so plain unit runs need no services; canonical environments
 // (scripts/test-postgres.sh and CI) always provide the database, where
 // skipping is impossible.

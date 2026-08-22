@@ -33,7 +33,7 @@ until docker exec "$CONTAINER" pg_isready -U ants >/dev/null 2>&1; do
   sleep 0.5
 done
 
-export ANTS_TEST_PG_DSN="postgres://ants:ants@127.0.0.1:$PORT/$DB?sslmode=disable"
+export TEST_PG_DSN="postgres://ants:ants@127.0.0.1:$PORT/$DB?sslmode=disable"
 status=0
 go test -count=1 -race ./internal/store/... || status=$?
 
