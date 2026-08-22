@@ -34,3 +34,6 @@ documented limitation, not a silent one.
   current product surface needs anyway.
 - Adding the outbox later changes adapter internals, not the envelope or the
   domain code that emits events.
+
+Update (2026-08-22): the deferred durable outbox has landed with a store-owned
+clock and at-least-once delivery; see ADR-0011.

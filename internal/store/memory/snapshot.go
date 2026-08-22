@@ -10,22 +10,25 @@ import (
 // copied with capacity == length so appends during fn allocate fresh backing
 // arrays and cannot leak into the backup.
 type stateBackup struct {
-	tenants      map[domain.TenantID]*domain.Tenant
-	tenantSlugs  map[string]domain.TenantID
-	projects     map[domain.ProjectID]*domain.Project
-	threads      map[domain.ThreadID]*domain.Thread
-	messages     map[domain.ThreadID][]*domain.Message
-	specs        map[domain.SpecID]*domain.Spec
-	tasks        map[domain.TaskID]*domain.Task
-	runs         map[domain.RunID]*domain.Run
-	runIdemKeys  map[idemKey]domain.RunID
-	workspaces   map[domain.WorkspaceID]*domain.Workspace
-	artifacts    map[domain.ArtifactID]*domain.Artifact
-	auditLog     []*domain.AuditEvent
-	policyByRun  map[domain.RunID][]*domain.PolicyDecision
-	integrations map[domain.IntegrationID]*domain.IntegrationConnection
-	events       []*domain.Event
-	eventSeq     int64
+	tenants       map[domain.TenantID]*domain.Tenant
+	tenantSlugs   map[string]domain.TenantID
+	projects      map[domain.ProjectID]*domain.Project
+	threads       map[domain.ThreadID]*domain.Thread
+	messages      map[domain.ThreadID][]*domain.Message
+	specs         map[domain.SpecID]*domain.Spec
+	tasks         map[domain.TaskID]*domain.Task
+	runs          map[domain.RunID]*domain.Run
+	runIdemKeys   map[idemKey]domain.RunID
+	workspaces    map[domain.WorkspaceID]*domain.Workspace
+	artifacts     map[domain.ArtifactID]*domain.Artifact
+	auditLog      []*domain.AuditEvent
+	policyByRun   map[domain.RunID][]*domain.PolicyDecision
+	integrations  map[domain.IntegrationID]*domain.IntegrationConnection
+	events        []*domain.Event
+	outbox        []*outboxMessage
+	outboxByID    map[string]*outboxMessage
+	outboxByDedup map[string]*outboxMessage
+	eventSeq      int64
 }
 
 // backup clones the live state. Callers must hold unitMu (and should take
@@ -35,22 +38,32 @@ func (st *storeState) backup() *stateBackup {
 	defer st.mu.RUnlock()
 
 	b := &stateBackup{
-		tenants:      make(map[domain.TenantID]*domain.Tenant, len(st.tenants)),
-		tenantSlugs:  make(map[string]domain.TenantID, len(st.tenantSlugs)),
-		projects:     make(map[domain.ProjectID]*domain.Project, len(st.projects)),
-		threads:      make(map[domain.ThreadID]*domain.Thread, len(st.threads)),
-		messages:     make(map[domain.ThreadID][]*domain.Message, len(st.messages)),
-		specs:        make(map[domain.SpecID]*domain.Spec, len(st.specs)),
-		tasks:        make(map[domain.TaskID]*domain.Task, len(st.tasks)),
-		runs:         make(map[domain.RunID]*domain.Run, len(st.runs)),
-		runIdemKeys:  make(map[idemKey]domain.RunID, len(st.runIdemKeys)),
-		workspaces:   make(map[domain.WorkspaceID]*domain.Workspace, len(st.workspaces)),
-		artifacts:    make(map[domain.ArtifactID]*domain.Artifact, len(st.artifacts)),
-		policyByRun:  make(map[domain.RunID][]*domain.PolicyDecision, len(st.policyByRun)),
-		integrations: make(map[domain.IntegrationID]*domain.IntegrationConnection, len(st.integrations)),
-		auditLog:     make([]*domain.AuditEvent, len(st.auditLog)),
-		events:       make([]*domain.Event, len(st.events)),
-		eventSeq:     st.eventSeq,
+		tenants:       make(map[domain.TenantID]*domain.Tenant, len(st.tenants)),
+		tenantSlugs:   make(map[string]domain.TenantID, len(st.tenantSlugs)),
+		projects:      make(map[domain.ProjectID]*domain.Project, len(st.projects)),
+		threads:       make(map[domain.ThreadID]*domain.Thread, len(st.threads)),
+		messages:      make(map[domain.ThreadID][]*domain.Message, len(st.messages)),
+		specs:         make(map[domain.SpecID]*domain.Spec, len(st.specs)),
+		tasks:         make(map[domain.TaskID]*domain.Task, len(st.tasks)),
+		runs:          make(map[domain.RunID]*domain.Run, len(st.runs)),
+		runIdemKeys:   make(map[idemKey]domain.RunID, len(st.runIdemKeys)),
+		workspaces:    make(map[domain.WorkspaceID]*domain.Workspace, len(st.workspaces)),
+		artifacts:     make(map[domain.ArtifactID]*domain.Artifact, len(st.artifacts)),
+		policyByRun:   make(map[domain.RunID][]*domain.PolicyDecision, len(st.policyByRun)),
+		integrations:  make(map[domain.IntegrationID]*domain.IntegrationConnection, len(st.integrations)),
+		auditLog:      make([]*domain.AuditEvent, len(st.auditLog)),
+		events:        make([]*domain.Event, len(st.events)),
+		outbox:        make([]*outboxMessage, len(st.outbox)),
+		outboxByID:    make(map[string]*outboxMessage, len(st.outboxByID)),
+		outboxByDedup: make(map[string]*outboxMessage, len(st.outboxByDedup)),
+		eventSeq:      st.eventSeq,
+	}
+	copy(b.outbox, st.outbox)
+	for k, v := range st.outboxByID {
+		b.outboxByID[k] = v
+	}
+	for k, v := range st.outboxByDedup {
+		b.outboxByDedup[k] = v
 	}
 	for k, v := range st.tenants {
 		b.tenants[k] = cloneTenant(v)
@@ -187,6 +200,22 @@ func (st *storeState) restore(b *stateBackup) {
 	freshEvents := make([]*domain.Event, len(b.events))
 	copy(freshEvents, b.events)
 	st.events = freshEvents
+
+	freshOutbox := make([]*outboxMessage, len(b.outbox))
+	copy(freshOutbox, b.outbox)
+	st.outbox = freshOutbox
+
+	freshOutboxByID := make(map[string]*outboxMessage, len(b.outboxByID))
+	for k, v := range b.outboxByID {
+		freshOutboxByID[k] = v
+	}
+	st.outboxByID = freshOutboxByID
+
+	freshOutboxByDedup := make(map[string]*outboxMessage, len(b.outboxByDedup))
+	for k, v := range b.outboxByDedup {
+		freshOutboxByDedup[k] = v
+	}
+	st.outboxByDedup = freshOutboxByDedup
 
 	st.eventSeq = b.eventSeq
 }

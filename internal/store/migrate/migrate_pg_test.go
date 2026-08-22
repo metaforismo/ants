@@ -48,7 +48,7 @@ func TestMigrationsAgainstPostgres(t *testing.T) {
 		"tenants", "projects", "threads", "thread_messages",
 		"specs", "runs", "tasks", "workspaces",
 		"artifacts", "policy_decisions", "budgets",
-		"integration_connections", "audit_events", "events",
+		"integration_connections", "audit_events", "events", "outbox",
 	} {
 		var exists bool
 		if err := conn.QueryRowContext(ctx,
