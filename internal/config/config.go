@@ -86,7 +86,11 @@ type Server struct {
 	DevHeaderAuth   bool     `yaml:"dev_header_auth"`
 	ReadTimeout     Duration `yaml:"read_timeout"`
 	WriteTimeout    Duration `yaml:"write_timeout"`
+	IdleTimeout     Duration `yaml:"idle_timeout"`
 	ShutdownTimeout Duration `yaml:"shutdown_timeout"`
+	// ReadinessTimeout bounds each readiness probe's dependency checks so a
+	// slow database turns into a fast 503 instead of a hung health check.
+	ReadinessTimeout Duration `yaml:"readiness_timeout"`
 }
 
 // PostgresPool bounds the connection pool. Defaults are sized for a
@@ -154,7 +158,8 @@ type Outbox struct {
 // Worker bounds the process-level run executor that claims durable run
 // claims and drives them through the engine (ADR-0012 part 2). The lease
 // must leave room for missed heartbeats: lease >= 3x heartbeat_every means
-// two consecutive lost beats still renew inside the window.
+// two consecutive lost beats still renew inside the window. MaxAttempts caps
+// dispatches per claim before its run converges as exhausted (ADR-0013).
 type Worker struct {
 	BatchSize      int      `yaml:"batch_size"`
 	Interval       Duration `yaml:"interval"`
@@ -162,6 +167,7 @@ type Worker struct {
 	HeartbeatEvery Duration `yaml:"heartbeat_every"`
 	CleanupTimeout Duration `yaml:"cleanup_timeout"`
 	Concurrency    int      `yaml:"concurrency"`
+	MaxAttempts    int      `yaml:"max_attempts"`
 }
 
 func (o Outbox) Validate() error {
@@ -205,6 +211,9 @@ func (w Worker) Validate() error {
 	if w.Concurrency < 1 || w.Concurrency > 64 {
 		return fmt.Errorf("worker.concurrency must be within [1,64], got %d", w.Concurrency)
 	}
+	if w.MaxAttempts < 1 || w.MaxAttempts > 10 {
+		return fmt.Errorf("worker.max_attempts must be within [1,10], got %d", w.MaxAttempts)
+	}
 	return nil
 }
 
@@ -231,11 +240,13 @@ type Config struct {
 func Defaults() Config {
 	return Config{
 		Server: Server{
-			HTTPAddr:        "127.0.0.1:8080",
-			DevHeaderAuth:   false,
-			ReadTimeout:     Duration{10 * time.Second},
-			WriteTimeout:    Duration{30 * time.Second},
-			ShutdownTimeout: Duration{10 * time.Second},
+			HTTPAddr:         "127.0.0.1:8080",
+			DevHeaderAuth:    false,
+			ReadTimeout:      Duration{10 * time.Second},
+			WriteTimeout:     Duration{30 * time.Second},
+			IdleTimeout:      Duration{120 * time.Second},
+			ShutdownTimeout:  Duration{10 * time.Second},
+			ReadinessTimeout: Duration{2 * time.Second},
 		},
 		Store: Store{
 			Mode: StoreModeMemory,
@@ -277,6 +288,7 @@ func Defaults() Config {
 			HeartbeatEvery: Duration{5 * time.Second},
 			CleanupTimeout: Duration{10 * time.Second},
 			Concurrency:    4,
+			MaxAttempts:    3,
 		},
 		Log: Log{
 			Level:  LogInfo,
@@ -293,8 +305,23 @@ func (c Config) Validate() error {
 	if _, _, err := net.SplitHostPort(c.Server.HTTPAddr); err != nil {
 		return fmt.Errorf("server.http_addr %q is not host:port", c.Server.HTTPAddr)
 	}
-	if c.Server.ReadTimeout.Duration <= 0 || c.Server.WriteTimeout.Duration <= 0 || c.Server.ShutdownTimeout.Duration <= 0 {
+	if c.Server.ReadTimeout.Duration <= 0 || c.Server.WriteTimeout.Duration <= 0 ||
+		c.Server.IdleTimeout.Duration <= 0 || c.Server.ShutdownTimeout.Duration <= 0 ||
+		c.Server.ReadinessTimeout.Duration <= 0 {
 		return fmt.Errorf("server timeouts must be positive")
+	}
+	// Dev-header auth trusts unauthenticated identity headers (ADR-0004), so
+	// it may only serve loopback binds: anything routable beyond this host
+	// would expose tenant switching to the network. Enforced here so an
+	// operator cannot ship the development posture to a real interface.
+	if c.Server.DevHeaderAuth {
+		host, _, err := net.SplitHostPort(c.Server.HTTPAddr)
+		if err != nil {
+			return fmt.Errorf("server.http_addr %q is not host:port", c.Server.HTTPAddr)
+		}
+		if !isLoopbackHost(host) {
+			return fmt.Errorf("server.dev_header_auth must not listen on %q: bind a loopback address (127.0.0.1, ::1, localhost) or disable dev auth and deploy OIDC", c.Server.HTTPAddr)
+		}
 	}
 	switch c.Store.Mode {
 	case StoreModePostgres:
@@ -353,6 +380,20 @@ func (c Config) Validate() error {
 		return fmt.Errorf("log.format %q is not supported", c.Log.Format)
 	}
 	return nil
+}
+
+// isLoopbackHost reports whether a literal host binds only this machine.
+// Only literal loopback IPs and the reserved name "localhost" qualify; other
+// names would require DNS resolution inside validation, which must stay
+// deterministic and offline.
+func isLoopbackHost(host string) bool {
+	if host == "localhost" {
+		return true
+	}
+	if ip := net.ParseIP(host); ip != nil {
+		return ip.IsLoopback()
+	}
+	return false
 }
 
 // Redacted returns a copy whose secrets render as placeholders under any
@@ -425,6 +466,12 @@ func (c *Config) ApplyEnv(lookup LookupFunc) error {
 		return err
 	}
 	if err := boolVar(envServerDevAuth, &c.Server.DevHeaderAuth); err != nil {
+		return err
+	}
+	if err := durVar(envServerIdleTimeout, &c.Server.IdleTimeout); err != nil {
+		return err
+	}
+	if err := durVar(envServerReadinessTimeout, &c.Server.ReadinessTimeout); err != nil {
 		return err
 	}
 	mode := string(c.Store.Mode)
@@ -511,6 +558,9 @@ func (c *Config) ApplyEnv(lookup LookupFunc) error {
 	if err := intVar(envWorkerConcurrency, &c.Worker.Concurrency); err != nil {
 		return err
 	}
+	if err := intVar(envWorkerMaxAttempts, &c.Worker.MaxAttempts); err != nil {
+		return err
+	}
 	level := string(c.Log.Level)
 	if err := str(envLogLevel, &level); err != nil {
 		return err
@@ -530,40 +580,44 @@ func (c *Config) ApplyEnv(lookup LookupFunc) error {
 
 // Environment variable names. Kept in one place so docs and code cannot drift.
 const (
-	envServerAddr         = "ANTS_SERVER_HTTP_ADDR"
-	envServerDevAuth      = "ANTS_SERVER_DEV_AUTH"
-	envStoreMode          = "ANTS_STORE_MODE"
-	envStorePostgresDSN   = "ANTS_STORE_POSTGRES_DSN"
-	envStorePgMaxOpen     = "ANTS_STORE_POOL_MAX_OPEN_CONNS"
-	envStorePgMaxIdle     = "ANTS_STORE_POOL_MAX_IDLE_CONNS"
-	envOrchMaxParallel    = "ANTS_ORCHESTRATOR_MAX_PARALLEL_TASKS"
-	envOrchMaxTasksRun    = "ANTS_ORCHESTRATOR_MAX_TASKS_PER_RUN"
-	envOrchMaxExecOpsRun  = "ANTS_ORCHESTRATOR_MAX_EXEC_OPS_PER_RUN"
-	envOrchTaskTimeout    = "ANTS_ORCHESTRATOR_TASK_TIMEOUT"
-	envOrchStageTimeout   = "ANTS_ORCHESTRATOR_STAGE_TIMEOUT"
-	envOrchMaxAttempts    = "ANTS_ORCHESTRATOR_MAX_ATTEMPTS"
-	envOrchRetryBackoff   = "ANTS_ORCHESTRATOR_RETRY_BACKOFF_BASE"
-	envSandboxDriver      = "ANTS_SANDBOX_DRIVER"
-	envSandboxWorkRoot    = "ANTS_SANDBOX_WORK_ROOT"
-	envSCMDriver          = "ANTS_SCM_DRIVER"
-	envPolicyAllowCommits = "ANTS_POLICY_ALLOW_LOCAL_COMMITS"
-	envOutboxBatchSize    = "ANTS_OUTBOX_BATCH_SIZE"
-	envOutboxInterval     = "ANTS_OUTBOX_INTERVAL"
-	envOutboxLease        = "ANTS_OUTBOX_LEASE"
-	envOutboxMaxAttempts  = "ANTS_OUTBOX_MAX_ATTEMPTS"
-	envOutboxBackoff      = "ANTS_OUTBOX_RETRY_BACKOFF_BASE"
-	envWorkerBatchSize    = "ANTS_WORKER_BATCH_SIZE"
-	envWorkerInterval     = "ANTS_WORKER_INTERVAL"
-	envWorkerLease        = "ANTS_WORKER_LEASE"
-	envWorkerHeartbeat    = "ANTS_WORKER_HEARTBEAT_EVERY"
-	envWorkerCleanup      = "ANTS_WORKER_CLEANUP_TIMEOUT"
-	envWorkerConcurrency  = "ANTS_WORKER_CONCURRENCY"
-	envLogLevel           = "ANTS_LOG_LEVEL"
-	envLogFormat          = "ANTS_LOG_FORMAT"
+	envServerAddr             = "ANTS_SERVER_HTTP_ADDR"
+	envServerDevAuth          = "ANTS_SERVER_DEV_AUTH"
+	envServerIdleTimeout      = "ANTS_SERVER_IDLE_TIMEOUT"
+	envServerReadinessTimeout = "ANTS_SERVER_READINESS_TIMEOUT"
+	envStoreMode              = "ANTS_STORE_MODE"
+	envStorePostgresDSN       = "ANTS_STORE_POSTGRES_DSN"
+	envStorePgMaxOpen         = "ANTS_STORE_POOL_MAX_OPEN_CONNS"
+	envStorePgMaxIdle         = "ANTS_STORE_POOL_MAX_IDLE_CONNS"
+	envOrchMaxParallel        = "ANTS_ORCHESTRATOR_MAX_PARALLEL_TASKS"
+	envOrchMaxTasksRun        = "ANTS_ORCHESTRATOR_MAX_TASKS_PER_RUN"
+	envOrchMaxExecOpsRun      = "ANTS_ORCHESTRATOR_MAX_EXEC_OPS_PER_RUN"
+	envOrchTaskTimeout        = "ANTS_ORCHESTRATOR_TASK_TIMEOUT"
+	envOrchStageTimeout       = "ANTS_ORCHESTRATOR_STAGE_TIMEOUT"
+	envOrchMaxAttempts        = "ANTS_ORCHESTRATOR_MAX_ATTEMPTS"
+	envOrchRetryBackoff       = "ANTS_ORCHESTRATOR_RETRY_BACKOFF_BASE"
+	envSandboxDriver          = "ANTS_SANDBOX_DRIVER"
+	envSandboxWorkRoot        = "ANTS_SANDBOX_WORK_ROOT"
+	envSCMDriver              = "ANTS_SCM_DRIVER"
+	envPolicyAllowCommits     = "ANTS_POLICY_ALLOW_LOCAL_COMMITS"
+	envOutboxBatchSize        = "ANTS_OUTBOX_BATCH_SIZE"
+	envOutboxInterval         = "ANTS_OUTBOX_INTERVAL"
+	envOutboxLease            = "ANTS_OUTBOX_LEASE"
+	envOutboxMaxAttempts      = "ANTS_OUTBOX_MAX_ATTEMPTS"
+	envOutboxBackoff          = "ANTS_OUTBOX_RETRY_BACKOFF_BASE"
+	envWorkerBatchSize        = "ANTS_WORKER_BATCH_SIZE"
+	envWorkerInterval         = "ANTS_WORKER_INTERVAL"
+	envWorkerLease            = "ANTS_WORKER_LEASE"
+	envWorkerHeartbeat        = "ANTS_WORKER_HEARTBEAT_EVERY"
+	envWorkerCleanup          = "ANTS_WORKER_CLEANUP_TIMEOUT"
+	envWorkerConcurrency      = "ANTS_WORKER_CONCURRENCY"
+	envWorkerMaxAttempts      = "ANTS_WORKER_MAX_ATTEMPTS"
+	envLogLevel               = "ANTS_LOG_LEVEL"
+	envLogFormat              = "ANTS_LOG_FORMAT"
 )
 
 var knownEnvVars = map[string]bool{
 	envServerAddr: true, envServerDevAuth: true,
+	envServerIdleTimeout: true, envServerReadinessTimeout: true,
 	envStoreMode: true, envStorePostgresDSN: true,
 	envStorePgMaxOpen: true, envStorePgMaxIdle: true,
 	envOrchMaxParallel: true, envOrchMaxTasksRun: true, envOrchMaxExecOpsRun: true,
@@ -575,6 +629,7 @@ var knownEnvVars = map[string]bool{
 	envOutboxMaxAttempts: true, envOutboxBackoff: true,
 	envWorkerBatchSize: true, envWorkerInterval: true, envWorkerLease: true,
 	envWorkerHeartbeat: true, envWorkerCleanup: true, envWorkerConcurrency: true,
+	envWorkerMaxAttempts: true,
 }
 
 // unknownAntsVars scans the process environment so a mistyped override fails

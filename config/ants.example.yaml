@@ -9,7 +9,8 @@
 
 server:
   # Loopback by default. Exposing Ants publicly requires an authenticated edge;
-  # dev header auth below must stay off for anything non-local.
+  # dev header auth below must stay off for anything non-local — startup
+  # refuses dev auth on any non-loopback bind (ADR-0004).
   http_addr: "127.0.0.1:8080"
   # Development-only authentication: trusts X-Ants-Dev-Tenant /
   # X-Ants-Dev-Principal headers. NEVER enable outside local development;
@@ -17,7 +18,13 @@ server:
   dev_header_auth: true
   read_timeout: 10s
   write_timeout: 30s
+  # Idle keep-alive connections are closed after this long so load balancers
+  # and hostile clients cannot hold sockets forever.
+  idle_timeout: 120s
   shutdown_timeout: 10s
+  # Bounds each /readyz dependency check; a slow database must fail the probe
+  # fast instead of hanging the health endpoint.
+  readiness_timeout: 2s
 
 store:
   # memory: deterministic zero-dependency mode for development and tests.
@@ -28,6 +35,16 @@ store:
   #   max_open_conns: 10
   #   max_idle_conns: 5
   #   conn_max_lifetime: 30m
+
+outbox:
+  # The durable event dispatcher (ADR-0011). It leases queued messages in
+  # bounded batches, retries classified failures with exponential backoff,
+  # and dead-letters them after max_attempts. Delivery is at-least-once.
+  batch_size: 100
+  interval: 250ms
+  lease: 30s
+  max_attempts: 5
+  retry_backoff_base: 500ms
 
 orchestrator:
   max_parallel_tasks: 4
@@ -75,6 +92,12 @@ worker:
   # detached from shutdown cancellation so final states always land.
   cleanup_timeout: 10s
   concurrency: 4
+  # Dispatch budget per claim (first dispatch plus reclaims). A claim
+  # acquired more often than this converges its run — cancelled if it never
+  # started, failed with run_attempts_exhausted otherwise — instead of being
+  # reclaimed forever. Counts every acquisition, including shutdown-released
+  # ones, so leave headroom for deploy churn.
+  max_attempts: 3
 
 log:
   level: info

@@ -21,7 +21,7 @@ type createTenantRequest struct {
 
 func (s *Server) handleCreateTenant(w http.ResponseWriter, r *http.Request) {
 	var req createTenantRequest
-	if err := decodeStrict(r, &req); err != nil {
+	if err := decodeStrict(w, r, &req); err != nil {
 		writeProblem(w, r, asDomainError(err))
 		return
 	}
@@ -58,7 +58,7 @@ func (s *Server) handleCreateProject(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var req createProjectRequest
-	if err := decodeStrict(r, &req); err != nil {
+	if err := decodeStrict(w, r, &req); err != nil {
 		writeProblem(w, r, asDomainError(err))
 		return
 	}
@@ -105,7 +105,7 @@ func (s *Server) handleCreateThread(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var req createThreadRequest
-	if err := decodeStrict(r, &req); err != nil {
+	if err := decodeStrict(w, r, &req); err != nil {
 		writeProblem(w, r, asDomainError(err))
 		return
 	}
@@ -172,7 +172,7 @@ func (s *Server) handleAppendMessage(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var req appendMessageRequest
-	if err := decodeStrict(r, &req); err != nil {
+	if err := decodeStrict(w, r, &req); err != nil {
 		writeProblem(w, r, asDomainError(err))
 		return
 	}

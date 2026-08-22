@@ -80,8 +80,13 @@ type Server struct {
 	repos  ports.Repositories
 	auth   Authenticator
 	engine *orchestration.Engine
-	log    *slog.Logger
-	clock  ports.Clock
+	// ready reports whether backing dependencies can serve traffic. It is
+	// injected by the composition root per store mode: a bounded PostgreSQL
+	// ping there, an always-ready check for the memory store — never a
+	// sentinel query guessing at persistence health from inside the server.
+	ready func(ctx context.Context) error
+	log   *slog.Logger
+	clock ports.Clock
 
 	http *http.Server
 }
@@ -91,11 +96,17 @@ type Deps struct {
 	Repos  ports.Repositories
 	Engine *orchestration.Engine
 	Logger *slog.Logger
+	// Ready performs the dependency checks behind /readyz. Required: a
+	// server that cannot state its readiness must not pretend to be ready.
+	Ready func(ctx context.Context) error
 }
 
 func New(deps Deps) (*Server, error) {
 	if deps.Repos.Tenants == nil || deps.Engine == nil || deps.Logger == nil {
 		return nil, fmt.Errorf("server: repos, engine and logger are required")
+	}
+	if deps.Ready == nil {
+		return nil, fmt.Errorf("server: a readiness check is required")
 	}
 	var auth Authenticator
 	if deps.Config.Server.DevHeaderAuth {
@@ -108,6 +119,7 @@ func New(deps Deps) (*Server, error) {
 		repos:  deps.Repos,
 		auth:   auth,
 		engine: deps.Engine,
+		ready:  deps.Ready,
 		log:    deps.Logger,
 		clock:  ports.SystemClock{},
 	}
@@ -118,6 +130,10 @@ func New(deps Deps) (*Server, error) {
 		Handler:      mux,
 		ReadTimeout:  deps.Config.Server.ReadTimeout.Duration,
 		WriteTimeout: deps.Config.Server.WriteTimeout.Duration,
+		IdleTimeout:  deps.Config.Server.IdleTimeout.Duration,
+		// Explicit stdlib default (1 MiB): header size is bounded so a
+		// hostile client cannot balloon server memory with header lines.
+		MaxHeaderBytes: http.DefaultMaxHeaderBytes,
 	}
 	return srv, nil
 }

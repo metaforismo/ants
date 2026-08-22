@@ -47,6 +47,7 @@ func testConfig() Config {
 		HeartbeatEvery: beatEvery,
 		CleanupTimeout: time.Second,
 		Concurrency:    4,
+		MaxAttempts:    3,
 	}
 }
 
@@ -59,10 +60,12 @@ func testConfig() Config {
 type stubExecutor struct {
 	runStore ports.RunStore
 
-	mu        sync.Mutex
-	behavior  map[domain.RunID]func(ctx context.Context) error
-	outcomes  map[domain.RunID]error
-	recovered []recoveryRecord
+	mu              sync.Mutex
+	behavior        map[domain.RunID]func(ctx context.Context) error
+	outcomes        map[domain.RunID]error
+	recovered       []recoveryRecord
+	converged       []convergeRecord
+	convergeFailure map[domain.RunID]error
 
 	started   chan domain.RunID
 	active    atomic.Int64
@@ -74,12 +77,19 @@ type recoveryRecord struct {
 	cause string
 }
 
+type convergeRecord struct {
+	runID    domain.RunID
+	attempts int
+	cause    string
+}
+
 func newStubExecutor(runs ports.RunStore) *stubExecutor {
 	return &stubExecutor{
-		runStore: runs,
-		behavior: map[domain.RunID]func(ctx context.Context) error{},
-		outcomes: map[domain.RunID]error{},
-		started:  make(chan domain.RunID, 64),
+		runStore:        runs,
+		behavior:        map[domain.RunID]func(ctx context.Context) error{},
+		outcomes:        map[domain.RunID]error{},
+		convergeFailure: map[domain.RunID]error{},
+		started:         make(chan domain.RunID, 64),
 	}
 }
 
@@ -144,6 +154,59 @@ func (e *stubExecutor) RecoverInterrupted(ctx context.Context, tenantID domain.T
 	return e.runStore.Update(ctx, run, expected)
 }
 
+// ConvergeExhausted mirrors the engine's exhausted-run path: a guarded
+// terminal write — cancelled for a never-started run, failed with the
+// exhausted code for one abandoned mid-flight — unless a failure is injected
+// for that run.
+func (e *stubExecutor) ConvergeExhausted(ctx context.Context, tenantID domain.TenantID, id domain.RunID, attempts int, cause error) error {
+	e.mu.Lock()
+	e.converged = append(e.converged, convergeRecord{runID: id, attempts: attempts, cause: cause.Error()})
+	injected := e.convergeFailure[id]
+	e.mu.Unlock()
+	if injected != nil {
+		return injected
+	}
+
+	run, err := e.runStore.Get(ctx, tenantID, id)
+	if err != nil {
+		return err
+	}
+	if run.Status.Terminal() {
+		return nil
+	}
+	expected := run.Version
+	target := domain.RunFailed
+	failure := &domain.FailureInfo{Code: "run_attempts_exhausted", Message: cause.Error(), Transient: false}
+	if run.Status == domain.RunPending {
+		target = domain.RunCancelled
+		failure = nil
+	}
+	if err := run.Finish(target, time.Now().UTC(), failure); err != nil {
+		return err
+	}
+	return e.runStore.Update(ctx, run, expected)
+}
+
+func (e *stubExecutor) failConvergence(id domain.RunID, err error) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	e.convergeFailure[id] = err
+}
+
+// clearConvergenceFailure removes a previously injected convergence failure.
+func (e *stubExecutor) clearConvergenceFailure(id domain.RunID) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	delete(e.convergeFailure, id)
+}
+
+func (e *stubExecutor) convergenceCount(t *testing.T) int {
+	t.Helper()
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	return len(e.converged)
+}
+
 func (e *stubExecutor) waitStarted(t *testing.T, n int) {
 	t.Helper()
 	for i := 0; i < n; i++ {
@@ -171,6 +234,21 @@ func (e *stubExecutor) recoveryCount(t *testing.T) int {
 	e.mu.Lock()
 	defer e.mu.Unlock()
 	return len(e.recovered)
+}
+
+// neverStarted fails the test if the given run was ever handed to Execute.
+func (e *stubExecutor) neverStarted(t *testing.T, id domain.RunID) {
+	t.Helper()
+	select {
+	case started := <-e.started:
+		t.Fatalf("run %s must never execute, but execution of %s started", id, started)
+	default:
+	}
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	if _, ok := e.outcomes[id]; ok {
+		t.Fatalf("run %s must never execute, but an outcome was recorded", id)
+	}
 }
 
 // ---- claim-store decorator ----
@@ -385,6 +463,26 @@ func (w *testWorld) claim(id domain.RunID) *domain.RunClaim {
 
 func (w *testWorld) tenant() domain.TenantID { return w.tenantID }
 
+// burnAttempt acquires and immediately releases the claim once, exactly like
+// an epoch that took the lease and gave it back without executing anything.
+// Each call bumps the claim's attempts counter by one.
+func (w *testWorld) burnAttempt(id domain.RunID) {
+	w.t.Helper()
+	acquired, err := w.repos.RunClaims.Acquire(context.Background(), ports.RunClaimLeaseRequest{
+		TenantID: w.tenant(), RunID: id, Owner: "burner-worker", LeaseFor: time.Minute,
+	})
+	if err != nil {
+		w.t.Fatalf("burn attempt acquire: %v", err)
+	}
+	ref := ports.RunClaimRef{
+		TenantID: acquired.TenantID, RunID: acquired.RunID,
+		Owner: acquired.Owner, Token: acquired.Token, Generation: acquired.Generation,
+	}
+	if _, err := w.repos.RunClaims.Release(context.Background(), ref); err != nil {
+		w.t.Fatalf("burn attempt release: %v", err)
+	}
+}
+
 // runInRound executes ProcessOnce on its own goroutine and fails the test if
 // the round does not return within the guard window.
 func (w *testWorld) runInRound(ctx context.Context) <-chan error {
@@ -449,6 +547,8 @@ func TestConfigValidateBounds(t *testing.T) {
 		func() Config { c := base; c.HeartbeatEvery = 5 * time.Millisecond; return c }(),
 		func() Config { c := base; c.CleanupTimeout = 50 * time.Millisecond; return c }(),
 		func() Config { c := base; c.Concurrency = 0; return c }(),
+		func() Config { c := base; c.MaxAttempts = 0; return c }(),
+		func() Config { c := base; c.MaxAttempts = 11; return c }(),
 	}
 	for i, cfg := range violations {
 		if err := cfg.Validate(); err == nil {
@@ -629,6 +729,117 @@ func TestExpiredNonPendingRunConvergesOnceToInterruptedFailure(t *testing.T) {
 	awaitRound(t, w.runInRound(context.Background()))
 	if w.exec.recoveryCount(t) != 1 {
 		t.Fatalf("recovery must converge exactly once, ran %d times", w.exec.recoveryCount(t))
+	}
+}
+
+// TestAttemptsAtBudgetStillExecute pins the boundary of the dispatch budget:
+// an acquisition that lands exactly on MaxAttempts is the final legitimate
+// chance and must run, not converge.
+func TestAttemptsAtBudgetStillExecute(t *testing.T) {
+	w := newTestWorld(t, func(c *Config) { c.MaxAttempts = 2 })
+	run := w.seedRun("last-chance")
+	w.burnAttempt(run.ID)
+	w.exec.script(run.ID, w.completeBehavior(run.ID, domain.RunCompleted))
+
+	awaitRound(t, w.runInRound(context.Background()))
+
+	// The round's own acquisition was dispatch number two: at the budget.
+	if got := w.watch.acquiredRef(t, 0).Generation; got != 2 {
+		t.Fatalf("precondition: this round must be acquisition 2, got %d", got)
+	}
+	if got := w.run(run.ID).Status; got != domain.RunCompleted {
+		t.Fatalf("claim at the budget must still execute, run status %s", got)
+	}
+	if w.exec.convergenceCount(t) != 0 {
+		t.Fatal("executing at the budget must not invoke convergence")
+	}
+}
+
+func TestExhaustedPendingRunConvergesInsteadOfExecuting(t *testing.T) {
+	w := newTestWorld(t, func(c *Config) { c.MaxAttempts = 2 })
+	run := w.seedRun("poison")
+	for i := 0; i < 3; i++ {
+		w.burnAttempt(run.ID)
+	}
+
+	awaitRound(t, w.runInRound(context.Background()))
+
+	w.exec.neverStarted(t, run.ID)
+	finished := w.run(run.ID)
+	// A never-started run converges to cancelled — the honest terminal state
+	// the run machine offers work that never began — with the exhausted code
+	// recorded on its status event.
+	if finished.Status != domain.RunCancelled {
+		t.Fatalf("over-budget pending run must converge to cancelled, got %+v", finished)
+	}
+	if _, err := w.repos.RunClaims.Get(context.Background(), w.tenant(), run.ID); domain.ErrKindOf(err) != domain.ErrKindNotFound {
+		t.Fatalf("converged exhausted run's claim must be gone, got %v", err)
+	}
+
+	// Convergence is terminal: the next round has nothing to reclaim.
+	awaitRound(t, w.runInRound(context.Background()))
+	if w.exec.convergenceCount(t) != 1 {
+		t.Fatalf("exhausted convergence must happen exactly once, ran %d times", w.exec.convergenceCount(t))
+	}
+}
+
+func TestExhaustedMidFlightRunDoesNotRecoverAsInterrupted(t *testing.T) {
+	w := newTestWorld(t, func(c *Config) { c.MaxAttempts = 1 })
+	run := w.seedRun("burnt-midflight")
+	// The previous epoch moved the run mid-flight and died; enough reclaims
+	// followed that this acquisition is already over budget.
+	w.advanceRun(context.Background(), run.ID, domain.RunExecuting)
+	w.burnAttempt(run.ID)
+
+	awaitRound(t, w.runInRound(context.Background()))
+
+	w.exec.neverStarted(t, run.ID)
+	if w.exec.recoveryCount(t) != 0 {
+		t.Fatal("an over-budget run must converge as exhausted, not as interrupted")
+	}
+	finished := w.run(run.ID)
+	if finished.Status != domain.RunFailed || finished.Failure == nil ||
+		finished.Failure.Code != "run_attempts_exhausted" {
+		t.Fatalf("mid-flight over-budget run must converge exhausted, got %+v", finished)
+	}
+	if _, err := w.repos.RunClaims.Get(context.Background(), w.tenant(), run.ID); domain.ErrKindOf(err) != domain.ErrKindNotFound {
+		t.Fatalf("converged exhausted run's claim must be gone, got %v", err)
+	}
+}
+
+func TestConvergeExhaustedFailureLeavesClaimForRetry(t *testing.T) {
+	w := newTestWorld(t, func(c *Config) { c.MaxAttempts = 1 })
+	run := w.seedRun("flaky-converge")
+	w.burnAttempt(run.ID)
+	w.exec.failConvergence(run.ID, fmt.Errorf("persistence outage"))
+
+	awaitRound(t, w.runInRound(context.Background()))
+
+	// A failed convergence must leave both the run and its held claim for
+	// expiry-based retry — no half-converged state, no lost work.
+	held := w.claim(run.ID)
+	if held.Status != domain.ClaimClaimed {
+		t.Fatalf("failed convergence must keep the claim until expiry, got %+v", held)
+	}
+	if got := w.run(run.ID).Status; got != domain.RunPending {
+		t.Fatalf("failed convergence must not mutate the run, got %s", got)
+	}
+	if w.exec.convergenceCount(t) != 1 {
+		t.Fatalf("convergence attempted once, ran %d times", w.exec.convergenceCount(t))
+	}
+
+	// Once the outage clears and the lease lapses, the reclaimed claim
+	// converges on the next round: the reclaim bumps attempts past the
+	// budget again.
+	w.exec.clearConvergenceFailure(run.ID)
+	w.clock.Advance(2 * w.worker.cfg.Lease)
+	awaitRound(t, w.runInRound(context.Background()))
+	finished := w.run(run.ID)
+	if finished.Status != domain.RunCancelled {
+		t.Fatalf("retry after cleared outage must converge the run, got %+v", finished)
+	}
+	if _, err := w.repos.RunClaims.Get(context.Background(), w.tenant(), run.ID); domain.ErrKindOf(err) != domain.ErrKindNotFound {
+		t.Fatalf("converged exhausted run's claim must be gone, got %v", err)
 	}
 }
 

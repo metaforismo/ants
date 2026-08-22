@@ -1,6 +1,7 @@
 package server
 
 import (
+	"context"
 	"encoding/json"
 	"net/http"
 
@@ -37,9 +38,10 @@ func writeProblem(w http.ResponseWriter, r *http.Request, derr *domain.Error) {
 
 // decodeStrict parses a JSON body rejecting unknown fields so client typos
 // surface as 400s instead of silently ignored configuration. Bodies are
-// capped at 1 MiB.
-func decodeStrict(r *http.Request, dst any) error {
-	dec := json.NewDecoder(http.MaxBytesReader(nil, r.Body, 1<<20))
+// capped at 1 MiB; the ResponseWriter is passed through so an oversized body
+// also flags the connection for teardown instead of draining it.
+func decodeStrict(w http.ResponseWriter, r *http.Request, dst any) error {
+	dec := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<20))
 	dec.DisallowUnknownFields()
 	if err := dec.Decode(dst); err != nil {
 		return domain.Invalidf("invalid_body", "request body is not valid for this endpoint: %v", err)
@@ -69,10 +71,34 @@ func (s *Server) handleHealth(w http.ResponseWriter, _ *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
 }
 
+// handleReady answers 200 only while every injected dependency check passes.
+// A failing check is a transient problem: the process is alive but cannot
+// serve, so orchestrators should stop routing traffic to it.
 func (s *Server) handleReady(w http.ResponseWriter, r *http.Request) {
-	if _, err := s.repos.Tenants.GetBySlug(r.Context(), "__readiness_probe__"); err != nil && domain.ErrKindOf(err) != domain.ErrKindNotFound {
-		writeProblem(w, r, &domain.Error{Kind: domain.ErrKindTransient, Code: "store_unavailable", Message: "persistence layer not reachable"})
+	ctx, cancel := context.WithTimeout(r.Context(), s.cfg.Server.ReadinessTimeout.Duration)
+	defer cancel()
+	if err := s.ready(ctx); err != nil {
+		s.log.Error("readiness probe failed", "error", safeLogValue(err))
+		writeProblem(w, r, &domain.Error{
+			Kind:    domain.ErrKindTransient,
+			Code:    "store_unavailable",
+			Message: "persistence layer not reachable",
+		})
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]string{"status": "ready"})
+}
+
+// safeLogValue bounds error text in logs so probe failures cannot flood the
+// structured log with driver output.
+func safeLogValue(err error) string {
+	if err == nil {
+		return "<nil>"
+	}
+	const max = 512
+	msg := err.Error()
+	if len(msg) > max {
+		return msg[:max]
+	}
+	return msg
 }

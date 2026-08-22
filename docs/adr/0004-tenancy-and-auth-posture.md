@@ -37,3 +37,7 @@ Horizon 1 scope; this tranche has no identity provider available.
   later.
 - The dev-header mode must be removed from production profiles; the readiness
   gate before any SaaS beta includes deleting it or binding it to a build tag.
+  Update (2026-08-22, ADR-0013): startup validation now refuses
+  `dev_header_auth: true` on any non-loopback bind address, so the
+  development posture cannot ship to a reachable interface even by mistake;
+  full removal still lands with OIDC.

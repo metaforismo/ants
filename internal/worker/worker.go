@@ -4,7 +4,8 @@
 // through heartbeats, and persists claim-terminal outcomes on a context that
 // survives request and shutdown cancellation. Runs abandoned by crashed
 // workers are converged to a classified terminal failure instead of being
-// silently resumed.
+// silently resumed, and a claim whose dispatch budget (max_attempts) is spent
+// converges its run instead of feeding an unbounded reclaim loop.
 //
 // Fencing discipline: every disposition write carries the acquisition
 // epoch's credential tuple, so a superseded epoch cannot complete, release,
@@ -31,6 +32,7 @@ import (
 type Executor interface {
 	Execute(ctx context.Context, tenantID domain.TenantID, runID domain.RunID) error
 	RecoverInterrupted(ctx context.Context, tenantID domain.TenantID, runID domain.RunID, cause error) error
+	ConvergeExhausted(ctx context.Context, tenantID domain.TenantID, runID domain.RunID, attempts int, cause error) error
 }
 
 // Config bounds worker behavior. Every value validates at construction so a
@@ -49,6 +51,14 @@ type Config struct {
 	CleanupTimeout time.Duration
 	// Concurrency caps simultaneous engine executions.
 	Concurrency int
+	// MaxAttempts caps how many times a claim may be acquired — first claim
+	// plus reclaims after expiry or release — before the run converges to a
+	// classified exhausted failure instead of being dispatched again. It is
+	// the run-level counterpart of the outbox dead-letter: bounded retries,
+	// never an unbounded reclaim loop. Every acquisition counts, including
+	// ones aborted by shutdown or lost leases, so operators sizing this bound
+	// must account for deploy churn as well as real faults.
+	MaxAttempts int
 }
 
 func (c Config) Validate() error {
@@ -67,6 +77,8 @@ func (c Config) Validate() error {
 		return fmt.Errorf("worker.cleanup_timeout must be at least 100ms, got %s", c.CleanupTimeout)
 	case c.Concurrency < 1 || c.Concurrency > 64:
 		return fmt.Errorf("worker.concurrency must be within [1,64], got %d", c.Concurrency)
+	case c.MaxAttempts < 1 || c.MaxAttempts > 10:
+		return fmt.Errorf("worker.max_attempts must be within [1,10], got %d", c.MaxAttempts)
 	}
 	return nil
 }
@@ -148,7 +160,8 @@ func (w *Worker) ProcessOnce(ctx context.Context) (int, error) {
 // runClaim dispatches one freshly acquired claim by the run's current status:
 // pending runs execute, terminal runs need only their leftover claim removed,
 // anything else was abandoned mid-flight by some earlier epoch and converges
-// to a classified interrupted failure.
+// to a classified interrupted failure. A claim whose dispatch budget is spent
+// converges instead of executing, so a poison run cannot be reclaimed forever.
 func (w *Worker) runClaim(ctx context.Context, c *domain.RunClaim) {
 	ref := ports.RunClaimRef{
 		TenantID:   c.TenantID,
@@ -164,8 +177,6 @@ func (w *Worker) runClaim(ctx context.Context, c *domain.RunClaim) {
 		return
 	}
 	switch {
-	case run.Status == domain.RunPending:
-		w.executeClaim(ctx, ref)
 	case run.Status.Terminal():
 		// A previous epoch reached a terminal state but died before deleting
 		// its claim; cleanup is guarded and idempotent. It persists on the
@@ -174,6 +185,13 @@ func (w *Worker) runClaim(ctx context.Context, c *domain.RunClaim) {
 		cleanupCtx, cancel := w.cleanupContext(ctx)
 		defer cancel()
 		w.cleanupTerminal(cleanupCtx, ref, "leftover claim of finished run")
+	case c.Attempts > w.cfg.MaxAttempts:
+		// The acquisition that produced this epoch was one too many: every
+		// earlier chance to reach a terminal state ended in expiry, release,
+		// or abort. Converge visibly rather than feed the reclaim loop.
+		w.convergeExhausted(ctx, ref, c.Attempts)
+	case run.Status == domain.RunPending:
+		w.executeClaim(ctx, ref)
 	default:
 		w.recoverInterrupted(ctx, ref, run.Status)
 	}
@@ -327,6 +345,27 @@ func (w *Worker) recoverInterrupted(ctx context.Context, ref ports.RunClaimRef, 
 		return
 	}
 	w.cleanupTerminal(cleanupCtx, ref, "recovered interrupted run")
+}
+
+// convergeExhausted finishes a run whose dispatch budget is spent and removes
+// the claim this epoch holds. Same persistence discipline as recovery: the
+// convergence lands on the detached bounded context so shutdown cannot leave
+// it half-done; a failed convergence leaves the claim to expire and retry.
+func (w *Worker) convergeExhausted(ctx context.Context, ref ports.RunClaimRef, attempts int) {
+	cleanupCtx, cancel := w.cleanupContext(ctx)
+	defer cancel()
+
+	cause := fmt.Errorf("claim acquired %d times without reaching a terminal state; dispatch budget of %d exhausted",
+		attempts, w.cfg.MaxAttempts)
+	if err := w.exec.ConvergeExhausted(cleanupCtx, ref.TenantID, ref.RunID, attempts, cause); err != nil {
+		w.logger.Error("exhausted-run convergence failed; claim left to expire for retry",
+			"tenant_id", string(ref.TenantID), "run_id", string(ref.RunID),
+			"attempts", attempts, "error", safeErr(err))
+		return
+	}
+	w.logger.Warn("run converged as exhausted after repeated failed dispatches",
+		"tenant_id", string(ref.TenantID), "run_id", string(ref.RunID), "attempts", attempts)
+	w.cleanupTerminal(cleanupCtx, ref, "converged exhausted run")
 }
 
 // cleanupTerminal deletes the claim behind a terminal run; guarded and

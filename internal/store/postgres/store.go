@@ -157,6 +157,13 @@ func New(ctx context.Context, opts Options) (*Store, error) {
 
 func (s *Store) Close() error { return s.pool.Close() }
 
+// Ping verifies pool connectivity with the database. The caller owns the
+// deadline: readiness probes bound it with server.readiness_timeout so a
+// slow database fails fast instead of hanging the health check.
+func (s *Store) Ping(ctx context.Context) error {
+	return s.pool.PingContext(ctx)
+}
+
 // now is the store's single time authority for outbox scheduling.
 func (s *Store) now() time.Time { return s.clock.Now().UTC() }
 

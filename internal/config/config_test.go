@@ -120,6 +120,8 @@ func TestValidationFailures(t *testing.T) {
 		func(c *Config) { c.Server.HTTPAddr = "" },
 		func(c *Config) { c.Server.HTTPAddr = "no-port" },
 		func(c *Config) { c.Server.ReadTimeout = Duration{} },
+		func(c *Config) { c.Server.IdleTimeout = Duration{} },
+		func(c *Config) { c.Server.ReadinessTimeout = Duration{} },
 		func(c *Config) { c.Store.Mode = "sqlite" },
 		func(c *Config) { c.Orchestrator.MaxParallelTasks = 0 },
 		func(c *Config) { c.Orchestrator.MaxParallelTasks = 65 },
@@ -128,6 +130,7 @@ func TestValidationFailures(t *testing.T) {
 		func(c *Config) { c.SCM.Driver = "github_live" },
 		func(c *Config) { c.Worker.BatchSize = 0 },
 		func(c *Config) { c.Worker.Concurrency = 65 },
+		func(c *Config) { c.Worker.MaxAttempts = 11 },
 		// A heartbeat interval without margin inside the lease would expire
 		// live workers after two missed beats.
 		func(c *Config) {
@@ -146,6 +149,50 @@ func TestValidationFailures(t *testing.T) {
 	}
 }
 
+// TestDevHeaderAuthConfinedToLoopback pins the ADR-0004 production gate: the
+// development posture that trusts unauthenticated identity headers can never
+// serve a bind reachable beyond this machine. Startup fails instead of
+// exposing tenant switching to the network.
+func TestDevHeaderAuthConfinedToLoopback(t *testing.T) {
+	loopback := []string{
+		"127.0.0.1:8080",
+		"127.9.9.9:8080",
+		"[::1]:8080",
+		"localhost:8080",
+	}
+	for _, addr := range loopback {
+		cfg := Defaults()
+		cfg.Server.DevHeaderAuth = true
+		cfg.Server.HTTPAddr = addr
+		if err := cfg.Validate(); err != nil {
+			t.Fatalf("dev auth on loopback %s must validate: %v", addr, err)
+		}
+	}
+
+	exposed := []string{
+		"0.0.0.0:8080",
+		"[::]:8080",
+		"192.168.1.10:8080",
+		"ants.example.com:8080",
+	}
+	for _, addr := range exposed {
+		cfg := Defaults()
+		cfg.Server.DevHeaderAuth = true
+		cfg.Server.HTTPAddr = addr
+		if err := cfg.Validate(); err == nil {
+			t.Fatalf("dev auth on non-loopback %s must fail startup", addr)
+		} else if !strings.Contains(err.Error(), "dev_header_auth") {
+			t.Fatalf("refusal must name dev_header_auth: %v", err)
+		}
+
+		// The same binds are fine without the development posture.
+		cfg.Server.DevHeaderAuth = false
+		if err := cfg.Validate(); err != nil {
+			t.Fatalf("non-loopback bind without dev auth must validate: %v", err)
+		}
+	}
+}
+
 func TestWorkerEnvLayering(t *testing.T) {
 	cfg, err := load("", lookupFrom(map[string]string{
 		"ANTS_WORKER_BATCH_SIZE":      "16",
@@ -154,11 +201,12 @@ func TestWorkerEnvLayering(t *testing.T) {
 		"ANTS_WORKER_HEARTBEAT_EVERY": "7s",
 		"ANTS_WORKER_CLEANUP_TIMEOUT": "3s",
 		"ANTS_WORKER_CONCURRENCY":     "9",
+		"ANTS_WORKER_MAX_ATTEMPTS":    "5",
 	}))
 	if err != nil {
 		t.Fatalf("load: %v", err)
 	}
-	if cfg.Worker.BatchSize != 16 || cfg.Worker.Concurrency != 9 {
+	if cfg.Worker.BatchSize != 16 || cfg.Worker.Concurrency != 9 || cfg.Worker.MaxAttempts != 5 {
 		t.Fatalf("int env not applied: %+v", cfg.Worker)
 	}
 	if cfg.Worker.Interval.Duration != time.Second ||
@@ -169,6 +217,25 @@ func TestWorkerEnvLayering(t *testing.T) {
 	}
 	if err := cfg.Validate(); err != nil {
 		t.Fatalf("layered worker config must validate: %v", err)
+	}
+}
+
+func TestServerEnvLayering(t *testing.T) {
+	cfg, err := load("", lookupFrom(map[string]string{
+		"ANTS_SERVER_IDLE_TIMEOUT":      "45s",
+		"ANTS_SERVER_READINESS_TIMEOUT": "750ms",
+	}))
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	if cfg.Server.IdleTimeout.Duration != 45*time.Second {
+		t.Fatalf("idle timeout env not applied: %s", cfg.Server.IdleTimeout)
+	}
+	if cfg.Server.ReadinessTimeout.Duration != 750*time.Millisecond {
+		t.Fatalf("readiness timeout env not applied: %s", cfg.Server.ReadinessTimeout)
+	}
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("layered server config must validate: %v", err)
 	}
 }
 
