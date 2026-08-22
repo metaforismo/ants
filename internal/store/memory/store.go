@@ -26,6 +26,8 @@ var (
 // repository shares one mutex-guarded state so cross-aggregate reads observe
 // consistent snapshots.
 type Repos struct {
+	st *storeState
+
 	Tenants         *TenantRepository
 	Projects        *ProjectRepository
 	Threads         *ThreadRepository
@@ -57,6 +59,7 @@ func NewRepos() *Repos {
 		integrations: map[domain.IntegrationID]*domain.IntegrationConnection{},
 	}
 	return &Repos{
+		st:              st,
 		Tenants:         &TenantRepository{st: st},
 		Projects:        &ProjectRepository{st: st},
 		Threads:         &ThreadRepository{st: st},
@@ -72,8 +75,14 @@ func NewRepos() *Repos {
 	}
 }
 
+// NewTransactor returns the unit-of-work seam over this store's state.
+func (r *Repos) NewTransactor() ports.Transactor { return &transactor{r.st} }
+
 type storeState struct {
-	mu sync.RWMutex
+	// mu guards every collection for individual operations; unitMu
+	// serializes whole units of work (see transactor.go).
+	mu     sync.RWMutex
+	unitMu sync.Mutex
 
 	tenants      map[domain.TenantID]*domain.Tenant
 	tenantSlugs  map[string]domain.TenantID
@@ -112,4 +121,23 @@ func lockWrite(st *storeState) func() {
 
 func notFound(entity string, id any) error {
 	return domain.NotFoundf(entity, id)
+}
+
+// AsPorts exposes the repositories through the aggregate the application
+// wires, keeping call sites free of field-by-field copies.
+func (r *Repos) AsPorts() ports.Repositories {
+	return ports.Repositories{
+		Tenants:         r.Tenants,
+		Projects:        r.Projects,
+		Threads:         r.Threads,
+		Specs:           r.Specs,
+		Tasks:           r.Tasks,
+		Runs:            r.Runs,
+		Workspaces:      r.Workspaces,
+		Artifacts:       r.Artifacts,
+		Audit:           r.Audit,
+		PolicyDecisions: r.PolicyDecisions,
+		Integrations:    r.Integrations,
+		Events:          r.Events,
+	}
 }

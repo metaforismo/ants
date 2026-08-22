@@ -46,6 +46,10 @@ type Deps struct {
 	Artifacts  ports.ArtifactStore
 	Events     ports.EventLog
 
+	// Uow makes multi-record transitions (state + event, run + thread) commit
+	// atomically; every adapter supplies it.
+	Uow ports.Transactor
+
 	Policy   *policy.Engine
 	Sandbox  sandbox.Driver
 	SCM      scm.Driver
@@ -74,6 +78,9 @@ func New(deps Deps, cfg Config) (*Engine, error) {
 	if deps.Policy == nil || deps.Planner == nil || deps.Reviewer == nil || deps.Seeder == nil ||
 		deps.Clock == nil || deps.IDs == nil || deps.Sleeper == nil {
 		return nil, fmt.Errorf("orchestration: policy, planner, reviewer, seeder and time sources are required")
+	}
+	if deps.Uow == nil {
+		return nil, fmt.Errorf("orchestration: unit-of-work seam is required")
 	}
 	if deps.Sandbox == nil || deps.SCM == nil {
 		return nil, fmt.Errorf("orchestration: sandbox and scm drivers are required")
@@ -144,11 +151,22 @@ func (e *Engine) StartRun(ctx context.Context, in StartInput) (*StartResult, err
 	if err != nil {
 		return nil, err
 	}
-	run, err := domain.NewRun(domain.RunID(runID), in.TenantID, in.ThreadID, in.IdempotencyKey, e.deps.Clock.Now())
+	var run *domain.Run
+	err = e.deps.Uow.Do(ctx, func(ctx context.Context) error {
+		created, createErr := domain.NewRun(domain.RunID(runID), in.TenantID, in.ThreadID, in.IdempotencyKey, e.deps.Clock.Now())
+		if createErr != nil {
+			return createErr
+		}
+		created.Principal = in.Principal
+		if createErr = e.deps.Runs.Create(ctx, created); createErr != nil {
+			return createErr
+		}
+		run = created
+		// Thread moves to planning inside the same unit so a replayed or
+		// failed start never leaves a half-open thread.
+		return e.transitionThreadWithData(ctx, thread, domain.ThreadPlanning, nil)
+	})
 	if err != nil {
-		return nil, err
-	}
-	if err := e.deps.Runs.Create(ctx, run); err != nil {
 		if domain.ErrKindOf(err) == domain.ErrKindConflict {
 			// A concurrent request won the idempotency race; return its run.
 			replayed, getErr := e.deps.Runs.GetByIdempotencyKey(ctx, in.TenantID, in.ThreadID, in.IdempotencyKey)
@@ -156,10 +174,6 @@ func (e *Engine) StartRun(ctx context.Context, in StartInput) (*StartResult, err
 				return &StartResult{Run: replayed, Replayed: true}, nil
 			}
 		}
-		return nil, err
-	}
-
-	if err := e.transitionThread(ctx, thread, domain.ThreadPlanning); err != nil {
 		return nil, err
 	}
 	return &StartResult{Run: run}, nil
@@ -192,16 +206,19 @@ func (e *Engine) newID(prefix string) (string, error) {
 	return id, nil
 }
 
-// transitionRun persists a run state transition under optimistic concurrency.
+// transitionRun persists a run state transition under optimistic concurrency,
+// with its status event committing in the same unit of work.
 func (e *Engine) transitionRun(ctx context.Context, run *domain.Run, next domain.RunStatus) error {
-	expected := run.Version
-	if err := run.TransitionTo(next); err != nil {
-		return err
-	}
-	if err := e.deps.Runs.Update(ctx, run, expected); err != nil {
-		return err
-	}
-	return e.emitEvent(ctx, evtFromRun(run, domain.EventRunStatusChanged, map[string]any{"to": string(next)}))
+	return e.deps.Uow.Do(ctx, func(ctx context.Context) error {
+		expected := run.Version
+		if err := run.TransitionTo(next); err != nil {
+			return err
+		}
+		if err := e.deps.Runs.Update(ctx, run, expected); err != nil {
+			return err
+		}
+		return e.emitEvent(ctx, evtFromRun(run, domain.EventRunStatusChanged, map[string]any{"to": string(next)}))
+	})
 }
 
 func (e *Engine) transitionThread(ctx context.Context, thread *domain.Thread, next domain.ThreadStatus) error {
@@ -209,34 +226,38 @@ func (e *Engine) transitionThread(ctx context.Context, thread *domain.Thread, ne
 }
 
 // transitionThreadWithData persists a thread transition and emits its status
-// event; extra fields merge into the event data.
+// event in one unit; extra fields merge into the event data.
 func (e *Engine) transitionThreadWithData(ctx context.Context, thread *domain.Thread, next domain.ThreadStatus, extra map[string]any) error {
-	expected := thread.Version
-	if err := thread.TransitionTo(next); err != nil {
-		return err
-	}
-	if err := e.deps.Threads.Update(ctx, thread, expected); err != nil {
-		return err
-	}
-	data := map[string]any{"to": string(next)}
-	for k, v := range extra {
-		data[k] = v
-	}
-	return e.emitEvent(ctx, evtFromThread(thread, domain.EventThreadStatusChanged, data))
+	return e.deps.Uow.Do(ctx, func(ctx context.Context) error {
+		expected := thread.Version
+		if err := thread.TransitionTo(next); err != nil {
+			return err
+		}
+		if err := e.deps.Threads.Update(ctx, thread, expected); err != nil {
+			return err
+		}
+		data := map[string]any{"to": string(next)}
+		for k, v := range extra {
+			data[k] = v
+		}
+		return e.emitEvent(ctx, evtFromThread(thread, domain.EventThreadStatusChanged, data))
+	})
 }
 
 func (e *Engine) transitionTask(ctx context.Context, task *domain.Task, next domain.TaskStatus) error {
-	expected := task.Version
-	if err := task.TransitionTo(next); err != nil {
-		return err
-	}
-	if err := e.deps.Tasks.Update(ctx, task, expected); err != nil {
-		return err
-	}
-	return e.emitEvent(ctx, evtFromTask(task, domain.EventTaskStatusChanged, map[string]any{
-		"to":       string(next),
-		"attempts": task.Attempts,
-	}))
+	return e.deps.Uow.Do(ctx, func(ctx context.Context) error {
+		expected := task.Version
+		if err := task.TransitionTo(next); err != nil {
+			return err
+		}
+		if err := e.deps.Tasks.Update(ctx, task, expected); err != nil {
+			return err
+		}
+		return e.emitEvent(ctx, evtFromTask(task, domain.EventTaskStatusChanged, map[string]any{
+			"to":       string(next),
+			"attempts": task.Attempts,
+		}))
+	})
 }
 
 func (e *Engine) emitEvent(ctx context.Context, event *domain.Event) error {

@@ -402,6 +402,7 @@ func TestEngineRejectsInvalidDriverPairing(t *testing.T) {
 		Threads: h.repos.Threads, Projects: h.repos.Projects, Specs: h.repos.Specs,
 		Tasks: h.repos.Tasks, Runs: h.repos.Runs, Workspaces: h.repos.Workspaces,
 		Artifacts: h.repos.Artifacts, Events: h.repos.Events,
+		Uow:      h.repos.NewTransactor(),
 		Policy:   pol,
 		Sandbox:  sandbox.NewFakeDriver(),
 		SCM:      scm.NewMemory(),
@@ -418,6 +419,7 @@ func TestEngineRejectsInvalidDriverPairing(t *testing.T) {
 		Threads: h.repos.Threads, Projects: h.repos.Projects, Specs: h.repos.Specs,
 		Tasks: h.repos.Tasks, Runs: h.repos.Runs, Workspaces: h.repos.Workspaces,
 		Artifacts: h.repos.Artifacts, Events: h.repos.Events,
+		Uow:    h.repos.NewTransactor(),
 		Policy: pol, Sandbox: sandbox.NewFakeDriver(), SCM: scm.NewMemory(),
 		Seeder: seederFunc(func(context.Context, string) (scm.Seed, error) { return scm.Seed{}, nil }),
 		Clock:  h.clock, IDs: ports.RandomIDs{}, Sleeper: h.sleeper,
@@ -437,5 +439,55 @@ func validConfig() Config {
 		RetryBackoff:     time.Millisecond,
 		MaxTasksPerRun:   8,
 		MaxExecOpsPerRun: 64,
+	}
+}
+
+// flakyEventLog fails appends after N successes so tests can prove that a
+// state change and its event commit or roll back together.
+type flakyEventLog struct {
+	ports.EventLog
+	failAfter int
+	calls     int
+}
+
+func (f *flakyEventLog) Append(ctx context.Context, evt *domain.Event) error {
+	f.calls++
+	if f.calls > f.failAfter {
+		return &domain.Error{Kind: domain.ErrKindTransient, Code: "injected", Message: "event log unavailable"}
+	}
+	return f.EventLog.Append(ctx, evt)
+}
+
+func TestTransitionAtomicityRollsBackStateWithoutEvent(t *testing.T) {
+	h := newHarness(t)
+	_, thread := h.seedWorld(t)
+	ctx := context.Background()
+
+	start, err := h.engine.StartRun(ctx, startInput(thread, "atomic-key"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	fresh, err := h.repos.Runs.Get(ctx, testTenantID, start.Run.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	events := &flakyEventLog{EventLog: h.repos.Events, failAfter: 1 << 30}
+	h.engine.deps.Events = events
+
+	// First transition succeeds (append allowed), second hits the injected
+	// failure and must leave neither state nor event behind.
+	if err := h.engine.transitionRun(ctx, fresh, domain.RunPlanning); err != nil {
+		t.Fatalf("first transition: %v", err)
+	}
+	events.failAfter = 0 // every append now fails
+	versionBefore := fresh.Version
+	err = h.engine.transitionRun(ctx, fresh, domain.RunExecuting)
+	if err == nil {
+		t.Fatalf("injected failure must surface")
+	}
+	reloaded, _ := h.repos.Runs.Get(ctx, testTenantID, start.Run.ID)
+	if reloaded.Status != domain.RunPlanning || reloaded.Version != versionBefore {
+		t.Fatalf("failed unit must not mutate persisted state: %+v", reloaded)
 	}
 }

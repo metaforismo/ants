@@ -159,3 +159,39 @@ func unmarshalJSONColumn(raw []byte, dst any) error {
 	}
 	return nil
 }
+
+// Do runs fn as one unit of work on this store. Nesting joins the caller's
+// transaction; an error or panic rolls the unit back (panic is re-raised
+// after rollback). Isolation is PostgreSQL's default READ COMMITTED, which
+// is sufficient because multi-writer correctness relies on unique
+// constraints and compare-and-swap version guards rather than repeatable
+// reads (ADR-0010).
+func (s *Store) Do(ctx context.Context, fn func(ctx context.Context) error) (err error) {
+	if txFrom(ctx) != nil {
+		return fn(ctx)
+	}
+	tx, beginErr := s.pool.BeginTx(ctx, nil)
+	if beginErr != nil {
+		return domain.Internalf(beginErr, "db_tx", "begin unit of work")
+	}
+	committed := false
+	defer func() {
+		if r := recover(); r != nil {
+			_ = tx.Rollback()
+			panic(r)
+		}
+		if !committed {
+			_ = tx.Rollback()
+		}
+	}()
+	if err := fn(withTx(ctx, tx)); err != nil {
+		return err
+	}
+	if commitErr := tx.Commit(); commitErr != nil {
+		return domain.Internalf(commitErr, "db_tx", "commit unit of work")
+	}
+	committed = true
+	return nil
+}
+
+var _ ports.Transactor = (*Store)(nil)

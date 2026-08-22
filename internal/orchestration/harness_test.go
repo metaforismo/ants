@@ -83,6 +83,7 @@ func newHarness(t *testing.T) *harness {
 		Workspaces: repos.Workspaces,
 		Artifacts:  repos.Artifacts,
 		Events:     repos.Events,
+		Uow:        repos.NewTransactor(),
 		Policy:     pol,
 		Sandbox:    h.fake,
 		SCM:        h.memSCM,

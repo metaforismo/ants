@@ -4,6 +4,7 @@
 package app
 
 import (
+	"context"
 	"fmt"
 	"io"
 	"log/slog"
@@ -17,6 +18,7 @@ import (
 	"github.com/metaforismo/ants/internal/sandbox"
 	"github.com/metaforismo/ants/internal/scm"
 	memorystore "github.com/metaforismo/ants/internal/store/memory"
+	"github.com/metaforismo/ants/internal/store/postgres"
 )
 
 // App holds the fully wired application for one configuration.
@@ -37,23 +39,29 @@ type App struct {
 func Build(cfg config.Config, logOut io.Writer) (*App, error) {
 	logger := newLogger(cfg.Log, logOut)
 
-	if cfg.Store.Mode != config.StoreModeMemory {
-		return nil, fmt.Errorf("app: store.mode %q requires the PostgreSQL adapter, which is not implemented yet; use store.mode memory", cfg.Store.Mode)
+	var (
+		repos      ports.Repositories
+		transactor ports.Transactor
+	)
+	switch cfg.Store.Mode {
+	case config.StoreModeMemory:
+		mem := memorystore.NewRepos()
+		repos = mem.AsPorts()
+		transactor = mem.NewTransactor()
+	case config.StoreModePostgres:
+		poolCfg := cfg.Store.PostgresPool
+		pgStore, pgErr := postgres.New(context.Background(), cfg.Store.PostgresDSN.Expose(),
+			poolCfg.MaxOpenConns, poolCfg.MaxIdleConns, poolCfg.ConnMaxLifetime.Duration)
+		if pgErr != nil {
+			return nil, fmt.Errorf("app: connect to postgres: %w", pgErr)
+		}
+		repos = pgStore.Repositories()
+		transactor = pgStore
+	default:
+		return nil, fmt.Errorf("app: store.mode %q is not supported", cfg.Store.Mode)
 	}
-	mem := memorystore.NewRepos()
-	repos := ports.Repositories{
-		Tenants:         mem.Tenants,
-		Projects:        mem.Projects,
-		Threads:         mem.Threads,
-		Specs:           mem.Specs,
-		Tasks:           mem.Tasks,
-		Runs:            mem.Runs,
-		Workspaces:      mem.Workspaces,
-		Artifacts:       mem.Artifacts,
-		Audit:           mem.Audit,
-		PolicyDecisions: mem.PolicyDecisions,
-		Integrations:    mem.Integrations,
-		Events:          mem.Events,
+	if err := cfg.Validate(); err != nil {
+		return nil, fmt.Errorf("app: %w", err)
 	}
 
 	clock := ports.SystemClock{}
@@ -80,6 +88,7 @@ func Build(cfg config.Config, logOut io.Writer) (*App, error) {
 		Workspaces: repos.Workspaces,
 		Artifacts:  repos.Artifacts,
 		Events:     repos.Events,
+		Uow:        transactor,
 		Policy:     pol,
 		Sandbox:    sandboxDriver,
 		SCM:        scmDriver,

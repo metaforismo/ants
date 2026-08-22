@@ -6,6 +6,7 @@ package storetest
 
 import (
 	"context"
+	"errors"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -31,8 +32,15 @@ var (
 	principal  = domain.PrincipalID(tid("prn", "contractprincipal"))
 )
 
-// NewReposFunc constructs a fresh, empty set of stores.
-type NewReposFunc func() ports.Repositories
+// World pairs a fresh empty store with its unit-of-work seam; adapters must
+// hand back views over the SAME underlying state.
+type World struct {
+	Repos ports.Repositories
+	Tx    ports.Transactor
+}
+
+// Factory constructs a fresh World per subtest.
+type Factory func() World
 
 func fixedTime(offset int) time.Time {
 	return time.Date(2026, 8, 22, 12, 0, offset, 0, time.UTC)
@@ -87,23 +95,139 @@ func seedThread(ctx context.Context, t *testing.T, repos ports.Repositories, own
 }
 
 // Run executes the full contract against a fresh store instance per subtest.
-// Every adapter (memory today, PostgreSQL now and forever after) must pass
-// the exact same assertions.
-func Run(t *testing.T, newRepos NewReposFunc) {
-	t.Run("TenantCRUDAndSlugUniqueness", func(t *testing.T) { testTenantCRUD(t, newRepos()) })
-	t.Run("ThreadLifecycleWithOptimisticConcurrency", func(t *testing.T) { testThreadConcurrency(t, newRepos()) })
-	t.Run("RunIdempotencyKeyUniquePerThread", func(t *testing.T) { testRunIdempotency(t, newRepos()) })
-	t.Run("ConcurrentIdempotentRunCreationHasSingleWinner", func(t *testing.T) { testConcurrentIdempotentCreate(t, newRepos()) })
-	t.Run("ConcurrentTaskUpdatesHaveOneWinnerPerVersion", func(t *testing.T) { testConcurrentStaleWrites(t, newRepos()) })
-	t.Run("TaskVersionGuardRejectsStaleWrites", func(t *testing.T) { testTaskStaleWrite(t, newRepos()) })
-	t.Run("SpecVersioningPerThread", func(t *testing.T) { testSpecLifecycle(t, newRepos()) })
-	t.Run("IntegrationConnectionLifecycle", func(t *testing.T) { testIntegrationLifecycle(t, newRepos()) })
-	t.Run("AuditLogIsAppendOnlyAndTenantScoped", func(t *testing.T) { testAuditAppendOnly(t, newRepos()) })
-	t.Run("PolicyDecisionsRetrieveByRun", func(t *testing.T) { testPolicyDecisionRetrieval(t, newRepos()) })
-	t.Run("CrossTenantReadsAreUniformNotFound", func(t *testing.T) { testCrossTenantIsolation(t, newRepos()) })
-	t.Run("EventsCarryMonotonicCursorAndFilterByRun", func(t *testing.T) { testEventPagination(t, newRepos()) })
-	t.Run("PaginationBoundariesAreExactAtCursors", func(t *testing.T) { testPaginationBoundaries(t, newRepos()) })
-	t.Run("ArtifactsRoundTripContentAndDigest", func(t *testing.T) { testArtifactRoundTrip(t, newRepos()) })
+// Every adapter (memory and PostgreSQL alike) must pass the exact same
+// assertions.
+func Run(t *testing.T, f Factory) {
+	world := func() (ports.Repositories, ports.Transactor) {
+		w := f()
+		return w.Repos, w.Tx
+	}
+	t.Run("TenantCRUDAndSlugUniqueness", func(t *testing.T) {
+		repos, _ := world()
+		testTenantCRUD(t, repos)
+	})
+	t.Run("ThreadLifecycleWithOptimisticConcurrency", func(t *testing.T) {
+		repos, _ := world()
+		testThreadConcurrency(t, repos)
+	})
+	t.Run("RunIdempotencyKeyUniquePerThread", func(t *testing.T) {
+		repos, _ := world()
+		testRunIdempotency(t, repos)
+	})
+	t.Run("ConcurrentIdempotentRunCreationHasSingleWinner", func(t *testing.T) {
+		repos, _ := world()
+		testConcurrentIdempotentCreate(t, repos)
+	})
+	t.Run("ConcurrentTaskUpdatesHaveOneWinnerPerVersion", func(t *testing.T) {
+		repos, _ := world()
+		testConcurrentStaleWrites(t, repos)
+	})
+	t.Run("TaskVersionGuardRejectsStaleWrites", func(t *testing.T) {
+		repos, _ := world()
+		testTaskStaleWrite(t, repos)
+	})
+	t.Run("SpecVersioningPerThread", func(t *testing.T) {
+		repos, _ := world()
+		testSpecLifecycle(t, repos)
+	})
+	t.Run("IntegrationConnectionLifecycle", func(t *testing.T) {
+		repos, _ := world()
+		testIntegrationLifecycle(t, repos)
+	})
+	t.Run("AuditLogIsAppendOnlyAndTenantScoped", func(t *testing.T) {
+		repos, _ := world()
+		testAuditAppendOnly(t, repos)
+	})
+	t.Run("PolicyDecisionsRetrieveByRun", func(t *testing.T) {
+		repos, _ := world()
+		testPolicyDecisionRetrieval(t, repos)
+	})
+	t.Run("CrossTenantReadsAreUniformNotFound", func(t *testing.T) {
+		repos, _ := world()
+		testCrossTenantIsolation(t, repos)
+	})
+	t.Run("EventsCarryMonotonicCursorAndFilterByRun", func(t *testing.T) {
+		repos, _ := world()
+		testEventPagination(t, repos)
+	})
+	t.Run("PaginationBoundariesAreExactAtCursors", func(t *testing.T) {
+		repos, _ := world()
+		testPaginationBoundaries(t, repos)
+	})
+	t.Run("ArtifactsRoundTripContentAndDigest", func(t *testing.T) {
+		repos, _ := world()
+		testArtifactRoundTrip(t, repos)
+	})
+	t.Run("UnitOfWorkRollsBackOnReturnedError", func(t *testing.T) {
+		repos, tx := world()
+		testUnitRollbackOnError(t, repos, tx)
+	})
+	t.Run("UnitOfWorkRollsBackOnPanic", func(t *testing.T) {
+		repos, tx := world()
+		testUnitRollbackOnPanic(t, repos, tx)
+	})
+	t.Run("NestedUnitsJoinTheOuterUnit", func(t *testing.T) {
+		repos, tx := world()
+		testNestedUnitsJoinOuter(t, repos, tx)
+	})
+}
+
+func testUnitRollbackOnError(t *testing.T, repos ports.Repositories, tx ports.Transactor) {
+	ctx := context.Background()
+	seedTenant(ctx, t, repos, tenantID, "acme")
+
+	boom := errors.New("deliberate failure")
+	err := tx.Do(ctx, func(ctx context.Context) error {
+		project := seedProject(ctx, t, repos, tenantID)
+		seedThread(ctx, t, repos, tenantID, project.ID)
+		return boom
+	})
+	if !errors.Is(err, boom) {
+		t.Fatalf("unit must propagate the error, got %v", err)
+	}
+	assertThreadCountZero(t, repos)
+}
+
+func testUnitRollbackOnPanic(t *testing.T, repos ports.Repositories, tx ports.Transactor) {
+	ctx := context.Background()
+	seedTenant(ctx, t, repos, tenantID, "acme")
+
+	func() {
+		defer func() { _ = recover() }()
+		_ = tx.Do(ctx, func(ctx context.Context) error {
+			project := seedProject(ctx, t, repos, tenantID)
+			seedThread(ctx, t, repos, tenantID, project.ID)
+			panic("deliberate panic inside unit")
+		})
+	}()
+	assertThreadCountZero(t, repos)
+}
+
+func testNestedUnitsJoinOuter(t *testing.T, repos ports.Repositories, tx ports.Transactor) {
+	ctx := context.Background()
+	seedTenant(ctx, t, repos, tenantID, "acme")
+
+	err := tx.Do(ctx, func(ctx context.Context) error {
+		innerErr := tx.Do(ctx, func(ctx context.Context) error {
+			project := seedProject(ctx, t, repos, tenantID)
+			seedThread(ctx, t, repos, tenantID, project.ID)
+			return errors.New("inner failure rolls back the outer unit too")
+		})
+		return innerErr
+	})
+	if ErrKind(err) != domain.ErrKindInvalid {
+		t.Logf("outer error: %v", err)
+	}
+	assertThreadCountZero(t, repos)
+}
+
+// assertThreadCountZero proves nothing from a rolled-back unit survived.
+func assertThreadCountZero(t *testing.T, repos ports.Repositories) {
+	t.Helper()
+	projects, err := repos.Projects.ListByTenant(context.Background(), tenantID)
+	if err != nil || len(projects) != 0 {
+		t.Fatalf("rolled-back project must not exist: %d %v", len(projects), err)
+	}
 }
 
 func testTenantCRUD(t *testing.T, repos ports.Repositories) {

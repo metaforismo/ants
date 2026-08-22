@@ -23,6 +23,11 @@ store:
   # memory: deterministic zero-dependency mode for development and tests.
   # postgres: durable mode; requires ANTS_STORE_POSTGRES_DSN.
   mode: memory
+  # Connection pool bounds for postgres mode (defaults shown).
+  # pool:
+  #   max_open_conns: 10
+  #   max_idle_conns: 5
+  #   conn_max_lifetime: 30m
 
 orchestrator:
   max_parallel_tasks: 4
