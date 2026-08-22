@@ -16,4 +16,5 @@ type Repositories struct {
 	PolicyDecisions PolicyDecisionStore
 	Integrations    IntegrationStore
 	Events          EventLog
+	Outbox          OutboxStore
 }

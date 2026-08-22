@@ -46,32 +46,53 @@ func scanEvent(rows *sql.Rows) (*domain.Event, error) {
 	return &e, nil
 }
 
-// Append persists the envelope and adopts the database-assigned monotonic
-// cursor. The seq column is an identity: application-supplied sequence
-// numbers are never trusted.
+// Append persists the event and enqueues its delivery in the SAME
+// transaction (ADR-0011): a state change that commits with its event can
+// never lose the durable notification, and a rolled-back change never emits
+// one. Store.Do provides that transaction — creating one when none is
+// active, joining the caller's unit when one is already carried by the
+// context. The dedup key is derived from the event ID, which is generated
+// once at publish time, so at-least-once redelivery stays
+// consumer-deduplicable.
 func (r *EventRepository) Append(ctx context.Context, evt *domain.Event) error {
 	data, err := marshalJSONColumn(nonNilMap(evt.Data))
 	if err != nil {
 		return err
 	}
-	var newSeq int64
-	insertErr := r.st.q(ctx).QueryRowContext(ctx,
-		`INSERT INTO events (id, type, occurred_at, tenant_id, aggregate_type,
-		   aggregate_id, aggregate_version, actor_type, actor_id, trace_id, run_id, data)
-		 VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)
-		 RETURNING seq`,
-		string(evt.ID), string(evt.Type), evt.OccurredAt, string(evt.TenantID),
-		evt.AggregateType, evt.AggregateID, evt.AggregateVersion,
-		string(evt.Actor.Type), evt.Actor.ID, evt.TraceID, string(evt.RunID), data,
-	).Scan(&newSeq)
-	if insertErr != nil {
-		if mapped := mapUniqueViolation(insertErr, "event_exists", "event %s already exists", evt.ID); mapped != insertErr {
-			return mapped
+	return r.st.Do(ctx, func(ctx context.Context) error {
+		q := r.st.q(ctx)
+		var newSeq int64
+		insertErr := q.QueryRowContext(ctx,
+			`INSERT INTO events (id, type, occurred_at, tenant_id, aggregate_type,
+			   aggregate_id, aggregate_version, actor_type, actor_id, trace_id, run_id, data)
+			 VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)
+			 RETURNING seq`,
+			string(evt.ID), string(evt.Type), evt.OccurredAt, string(evt.TenantID),
+			evt.AggregateType, evt.AggregateID, evt.AggregateVersion,
+			string(evt.Actor.Type), evt.Actor.ID, evt.TraceID, string(evt.RunID), data,
+		).Scan(&newSeq)
+		if insertErr != nil {
+			if mapped := mapUniqueViolation(insertErr, "event_exists", "event %s already exists", evt.ID); mapped != insertErr {
+				return mapped
+			}
+			return wrapWrite(insertErr)
 		}
-		return wrapWrite(insertErr)
-	}
-	evt.Seq = newSeq
-	return nil
+		evt.Seq = newSeq
+
+		envelope, merr := marshalJSONColumn(evt)
+		if merr != nil {
+			return merr
+		}
+		if _, werr := q.ExecContext(ctx,
+			`INSERT INTO outbox (id, dedup_key, tenant_id, envelope, status, attempts, max_attempts, available_at, created_at)
+			 VALUES ($1, $2, $3, $4, 'pending', 0, $5, $6, $6)
+			 ON CONFLICT (dedup_key) DO NOTHING`,
+			"obx_"+string(evt.ID), "event:"+string(evt.ID), string(evt.TenantID),
+			envelope, r.st.outboxMaxAttempts, r.st.now()); werr != nil {
+			return wrapWrite(werr)
+		}
+		return nil
+	})
 }
 
 func (r *EventRepository) ListByTenant(ctx context.Context, tenantID domain.TenantID, afterSeq int64, limit int) ([]*domain.Event, error) {

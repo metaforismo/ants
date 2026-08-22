@@ -40,10 +40,28 @@ func txFrom(ctx context.Context) *sql.Tx {
 	return tx
 }
 
+// Options configures one PostgreSQL store instance.
+type Options struct {
+	DSN             string
+	MaxOpenConns    int
+	MaxIdleConns    int
+	ConnMaxLifetime time.Duration
+	// OutboxMaxAttempts bounds retries for messages enqueued automatically
+	// when events are persisted (ADR-0011).
+	OutboxMaxAttempts int
+	// Clock is the single time authority for outbox scheduling (publish
+	// visibility, claim eligibility, lease expiry, retry instants). Nil
+	// selects the system clock.
+	Clock ports.Clock
+}
+
 // Store owns the connection pool and exposes every repository. Field order
 // mirrors ports.Repositories so wiring is a mechanical copy.
 type Store struct {
-	pool *sql.DB
+	pool  *sql.DB
+	clock ports.Clock
+
+	outboxMaxAttempts int
 
 	Tenants         TenantRepository
 	Projects        ProjectRepository
@@ -57,6 +75,7 @@ type Store struct {
 	PolicyDecisions PolicyDecisionRepository
 	Integrations    IntegrationRepository
 	Events          EventRepository
+	Outbox          OutboxRepository
 }
 
 // Repositories bundles the store into the aggregate the application wires.
@@ -74,6 +93,7 @@ func (s *Store) Repositories() ports.Repositories {
 		PolicyDecisions: &s.PolicyDecisions,
 		Integrations:    &s.Integrations,
 		Events:          &s.Events,
+		Outbox:          &s.Outbox,
 	}
 }
 
@@ -92,20 +112,28 @@ var (
 	_ ports.EventLog            = (*EventRepository)(nil)
 )
 
-// New opens the pool with validated bounds from configuration.
-func New(ctx context.Context, dsn string, maxOpen, maxIdle int, connMaxLifetime time.Duration) (*Store, error) {
-	pool, err := sql.Open("pgx", dsn)
+// New opens the pool with validated options.
+func New(ctx context.Context, opts Options) (*Store, error) {
+	pool, err := sql.Open("pgx", opts.DSN)
 	if err != nil {
 		return nil, fmt.Errorf("postgres: open: %w", err)
 	}
-	pool.SetMaxOpenConns(maxOpen)
-	pool.SetMaxIdleConns(maxIdle)
-	pool.SetConnMaxLifetime(connMaxLifetime)
+	pool.SetMaxOpenConns(opts.MaxOpenConns)
+	pool.SetMaxIdleConns(opts.MaxIdleConns)
+	pool.SetConnMaxLifetime(opts.ConnMaxLifetime)
 	if err := pool.PingContext(ctx); err != nil {
 		_ = pool.Close()
 		return nil, fmt.Errorf("postgres: ping: %w", err)
 	}
-	s := &Store{pool: pool}
+	if opts.OutboxMaxAttempts < 1 || opts.OutboxMaxAttempts > 100 {
+		_ = pool.Close()
+		return nil, fmt.Errorf("postgres: outbox max attempts must be within [1,100], got %d", opts.OutboxMaxAttempts)
+	}
+	clock := opts.Clock
+	if clock == nil {
+		clock = ports.SystemClock{}
+	}
+	s := &Store{pool: pool, clock: clock, outboxMaxAttempts: opts.OutboxMaxAttempts}
 	s.Tenants = TenantRepository{st: s}
 	s.Projects = ProjectRepository{st: s}
 	s.Threads = ThreadRepository{st: s}
@@ -118,10 +146,14 @@ func New(ctx context.Context, dsn string, maxOpen, maxIdle int, connMaxLifetime 
 	s.PolicyDecisions = PolicyDecisionRepository{st: s}
 	s.Integrations = IntegrationRepository{st: s}
 	s.Events = EventRepository{st: s}
+	s.Outbox = OutboxRepository{st: s}
 	return s, nil
 }
 
 func (s *Store) Close() error { return s.pool.Close() }
+
+// now is the store's single time authority for outbox scheduling.
+func (s *Store) now() time.Time { return s.clock.Now().UTC() }
 
 // q returns the caller's transaction when present, else the pool. All store
 // methods route through here so a single unit of work observes one snapshot.

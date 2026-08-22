@@ -8,9 +8,11 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"os"
 
 	"github.com/metaforismo/ants/internal/config"
 	"github.com/metaforismo/ants/internal/orchestration"
+	"github.com/metaforismo/ants/internal/outbox"
 	"github.com/metaforismo/ants/internal/planner"
 	"github.com/metaforismo/ants/internal/policy"
 	"github.com/metaforismo/ants/internal/ports"
@@ -31,6 +33,7 @@ type App struct {
 	Sandbox sandbox.Driver
 	SCM     scm.Driver
 	Seeder  orchestration.Seeder
+	Outbox  *outbox.Dispatcher
 }
 
 // Build wires every component from cfg. Store mode postgres is rejected with
@@ -50,8 +53,13 @@ func Build(cfg config.Config, logOut io.Writer) (*App, error) {
 		transactor = mem.NewTransactor()
 	case config.StoreModePostgres:
 		poolCfg := cfg.Store.PostgresPool
-		pgStore, pgErr := postgres.New(context.Background(), cfg.Store.PostgresDSN.Expose(),
-			poolCfg.MaxOpenConns, poolCfg.MaxIdleConns, poolCfg.ConnMaxLifetime.Duration)
+		pgStore, pgErr := postgres.New(context.Background(), postgres.Options{
+			DSN:               cfg.Store.PostgresDSN.Expose(),
+			MaxOpenConns:      poolCfg.MaxOpenConns,
+			MaxIdleConns:      poolCfg.MaxIdleConns,
+			ConnMaxLifetime:   poolCfg.ConnMaxLifetime.Duration,
+			OutboxMaxAttempts: cfg.Outbox.MaxAttempts,
+		})
 		if pgErr != nil {
 			return nil, fmt.Errorf("app: connect to postgres: %w", pgErr)
 		}
@@ -111,6 +119,27 @@ func Build(cfg config.Config, logOut io.Writer) (*App, error) {
 		return nil, fmt.Errorf("app: wire orchestration: %w", err)
 	}
 
+	// The dispatcher drains the durable outbox both store modes fill on
+	// event append (ADR-0011); long-running processes start it via Run.
+	workerID, werr := os.Hostname()
+	if werr != nil {
+		workerID = "unknown-host"
+	}
+	workerID = fmt.Sprintf("%s-%d", workerID, os.Getpid())
+	dispatcher, derr := outbox.New(repos.Outbox,
+		outbox.LogSink{Logger: logger}, logger,
+		outbox.Config{
+			BatchSize:        cfg.Outbox.BatchSize,
+			Interval:         cfg.Outbox.Interval.Duration,
+			Lease:            cfg.Outbox.Lease.Duration,
+			MaxAttempts:      cfg.Outbox.MaxAttempts,
+			RetryBackoffBase: cfg.Outbox.RetryBackoffBase.Duration,
+		},
+		workerID)
+	if derr != nil {
+		return nil, fmt.Errorf("app: wire outbox dispatcher: %w", derr)
+	}
+
 	return &App{
 		Config:  cfg,
 		Logger:  logger,
@@ -120,6 +149,7 @@ func Build(cfg config.Config, logOut io.Writer) (*App, error) {
 		Sandbox: sandboxDriver,
 		SCM:     scmDriver,
 		Seeder:  seeder{},
+		Outbox:  dispatcher,
 	}, nil
 }
 

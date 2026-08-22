@@ -141,6 +141,35 @@ type Policy struct {
 	AllowLocalCommits bool `yaml:"allow_local_commits"`
 }
 
+// Outbox bounds the in-process dispatcher that drains durably queued
+// events. Defaults suit a single node; every value validates at startup.
+type Outbox struct {
+	BatchSize        int      `yaml:"batch_size"`
+	Interval         Duration `yaml:"interval"`
+	Lease            Duration `yaml:"lease"`
+	MaxAttempts      int      `yaml:"max_attempts"`
+	RetryBackoffBase Duration `yaml:"retry_backoff_base"`
+}
+
+func (o Outbox) Validate() error {
+	if o.BatchSize < 1 || o.BatchSize > 1000 {
+		return fmt.Errorf("outbox.batch_size must be within [1,1000], got %d", o.BatchSize)
+	}
+	if o.Interval.Duration < 10*time.Millisecond {
+		return fmt.Errorf("outbox.interval must be at least 10ms, got %s", o.Interval)
+	}
+	if o.Lease.Duration < time.Second {
+		return fmt.Errorf("outbox.lease must be at least 1s, got %s", o.Lease)
+	}
+	if o.MaxAttempts < 1 || o.MaxAttempts > 100 {
+		return fmt.Errorf("outbox.max_attempts must be within [1,100], got %d", o.MaxAttempts)
+	}
+	if o.RetryBackoffBase.Duration < 0 {
+		return fmt.Errorf("outbox.retry_backoff_base must not be negative")
+	}
+	return nil
+}
+
 type Log struct {
 	Level  LogLevel  `yaml:"level"`
 	Format LogFormat `yaml:"format"`
@@ -153,6 +182,7 @@ type Config struct {
 	Sandbox      Sandbox      `yaml:"sandbox"`
 	SCM          SCM          `yaml:"scm"`
 	Policy       Policy       `yaml:"policy"`
+	Outbox       Outbox       `yaml:"outbox"`
 	Log          Log          `yaml:"log"`
 }
 
@@ -193,6 +223,13 @@ func Defaults() Config {
 		},
 		Policy: Policy{
 			AllowLocalCommits: true,
+		},
+		Outbox: Outbox{
+			BatchSize:        100,
+			Interval:         Duration{250 * time.Millisecond},
+			Lease:            Duration{30 * time.Second},
+			MaxAttempts:      5,
+			RetryBackoffBase: Duration{500 * time.Millisecond},
 		},
 		Log: Log{
 			Level:  LogInfo,
@@ -251,6 +288,9 @@ func (c Config) Validate() error {
 	case SCMDriverMemory, SCMDriverLocalGit:
 	default:
 		return fmt.Errorf("scm.driver %q is not supported", c.SCM.Driver)
+	}
+	if err := c.Outbox.Validate(); err != nil {
+		return err
 	}
 	switch c.Log.Level {
 	case LogDebug, LogInfo, LogWarn, LogError:
@@ -388,6 +428,21 @@ func (c *Config) ApplyEnv(lookup LookupFunc) error {
 	if err := boolVar(envPolicyAllowCommits, &c.Policy.AllowLocalCommits); err != nil {
 		return err
 	}
+	if err := intVar(envOutboxBatchSize, &c.Outbox.BatchSize); err != nil {
+		return err
+	}
+	if err := durVar(envOutboxInterval, &c.Outbox.Interval); err != nil {
+		return err
+	}
+	if err := durVar(envOutboxLease, &c.Outbox.Lease); err != nil {
+		return err
+	}
+	if err := intVar(envOutboxMaxAttempts, &c.Outbox.MaxAttempts); err != nil {
+		return err
+	}
+	if err := durVar(envOutboxBackoff, &c.Outbox.RetryBackoffBase); err != nil {
+		return err
+	}
 	level := string(c.Log.Level)
 	if err := str(envLogLevel, &level); err != nil {
 		return err
@@ -424,6 +479,11 @@ const (
 	envSandboxWorkRoot    = "ANTS_SANDBOX_WORK_ROOT"
 	envSCMDriver          = "ANTS_SCM_DRIVER"
 	envPolicyAllowCommits = "ANTS_POLICY_ALLOW_LOCAL_COMMITS"
+	envOutboxBatchSize    = "ANTS_OUTBOX_BATCH_SIZE"
+	envOutboxInterval     = "ANTS_OUTBOX_INTERVAL"
+	envOutboxLease        = "ANTS_OUTBOX_LEASE"
+	envOutboxMaxAttempts  = "ANTS_OUTBOX_MAX_ATTEMPTS"
+	envOutboxBackoff      = "ANTS_OUTBOX_RETRY_BACKOFF_BASE"
 	envLogLevel           = "ANTS_LOG_LEVEL"
 	envLogFormat          = "ANTS_LOG_FORMAT"
 )
@@ -437,6 +497,8 @@ var knownEnvVars = map[string]bool{
 	envOrchMaxAttempts: true, envOrchRetryBackoff: true,
 	envSandboxDriver: true, envSandboxWorkRoot: true, envSCMDriver: true,
 	envPolicyAllowCommits: true, envLogLevel: true, envLogFormat: true,
+	envOutboxBatchSize: true, envOutboxInterval: true, envOutboxLease: true,
+	envOutboxMaxAttempts: true, envOutboxBackoff: true,
 }
 
 // unknownAntsVars scans the process environment so a mistyped override fails

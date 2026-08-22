@@ -116,3 +116,54 @@ type EventLog interface {
 type Transactor interface {
 	Do(ctx context.Context, fn func(ctx context.Context) error) error
 }
+
+// OutboxMessage is one durably queued delivery. Envelope carries the
+// serialized domain event; consumers deduplicate on ID because at-least-once
+// delivery may repeat messages (ADR-0011). Publish visibility is decided by
+// the store's own clock — callers never supply timestamps.
+type OutboxMessage struct {
+	ID          string
+	DedupKey    string
+	TenantID    domain.TenantID
+	Envelope    []byte
+	Attempts    int
+	MaxAttempts int
+}
+
+// OutboxLeaseRequest bounds one claim round. Due-ness (publish visibility,
+// lease expiry) is evaluated against the store's clock, not caller time.
+type OutboxLeaseRequest struct {
+	WorkerID string
+	LeaseFor time.Duration
+	Limit    int
+}
+
+type OutboxStats struct {
+	Pending   int64
+	Leased    int64
+	Delivered int64
+	Dead      int64
+}
+
+// OutboxStore is the durable work/event queue behind the transactional
+// outbox pattern: publishes join the caller's transaction, claims are
+// exclusive under concurrency, and failures advance bounded classified
+// retries toward a dead-letter state. Every adapter owns ONE injected Clock
+// (SystemClock by default) that decides publish visibility, due claims,
+// lease expiry, and retry instants; callers pass only durations.
+type OutboxStore interface {
+	// Publish enqueues a message exactly once per dedup key. It participates
+	// in the caller's transaction when one is active.
+	Publish(ctx context.Context, msg OutboxMessage) error
+	// Lease atomically claims due messages for one worker and increments
+	// their attempt counters.
+	Lease(ctx context.Context, req OutboxLeaseRequest) ([]OutboxMessage, error)
+	// MarkDelivered acknowledges a message on behalf of its current lessee.
+	MarkDelivered(ctx context.Context, id, leasedBy string) error
+	// FailWithBackoff reschedules a failed delivery for its current lessee
+	// retryIn from the store clock's present instant (the adapter computes
+	// the absolute retry time on its own clock); exhausting max attempts
+	// dead-letters the message.
+	FailWithBackoff(ctx context.Context, id, leasedBy string, retryIn time.Duration, cause string) error
+	Stats(ctx context.Context) (OutboxStats, error)
+}

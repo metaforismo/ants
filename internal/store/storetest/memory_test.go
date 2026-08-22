@@ -12,7 +12,21 @@ import (
 func TestMemoryStoreContract(t *testing.T) {
 	Run(t, func() World {
 		mem := memorystore.NewRepos()
-		repos := mem.AsPorts()
-		return World{Repos: repos, Tx: mem.NewTransactor()}
+		return World{Repos: mem.AsPorts(), Tx: mem.NewTransactor()}
+	})
+}
+
+func TestMemoryOutboxContract(t *testing.T) {
+	RunOutbox(t, func() World {
+		clock := NewAdvancingClock()
+		mem, err := memorystore.NewReposWithOptions(memorystore.Options{Clock: clock})
+		if err != nil {
+			t.Fatalf("build memory store: %v", err)
+		}
+		return World{
+			Repos:   mem.AsPorts(),
+			Tx:      mem.NewTransactor(),
+			Advance: clock.Advance,
+		}
 	})
 }

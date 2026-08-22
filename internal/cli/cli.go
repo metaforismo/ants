@@ -163,6 +163,21 @@ func RunServe(args []string, stdout, stderr io.Writer) int {
 	serverErr := make(chan error, 1)
 	go func() { serverErr <- srv.Start() }()
 
+	// Drain the durable outbox until shutdown; delivery is at-least-once
+	// (ADR-0011), so stopping mid-batch only defers work, never loses it.
+	dispatchCtx, stopDispatch := context.WithCancel(context.Background())
+	dispatchDone := make(chan struct{})
+	go func() {
+		defer close(dispatchDone)
+		if err := application.Outbox.Run(dispatchCtx); err != nil && dispatchCtx.Err() == nil {
+			application.Logger.Error("outbox dispatcher stopped unexpectedly", "error", err.Error())
+		}
+	}()
+	defer func() {
+		stopDispatch()
+		<-dispatchDone
+	}()
+
 	select {
 	case err := <-serverErr:
 		if err != nil {

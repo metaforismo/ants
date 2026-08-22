@@ -32,15 +32,28 @@ var (
 	principal  = domain.PrincipalID(tid("prn", "contractprincipal"))
 )
 
-// World pairs a fresh empty store with its unit-of-work seam; adapters must
-// hand back views over the SAME underlying state.
+// World pairs a fresh empty store with its unit-of-work seam and a clock
+// advance hook; adapters must hand back views over the SAME underlying
+// state. Advance moves the adapter's scheduling clock (outbox leases,
+// backoff windows) so time-based behavior is deterministic in tests.
 type World struct {
-	Repos ports.Repositories
-	Tx    ports.Transactor
+	Repos   ports.Repositories
+	Tx      ports.Transactor
+	Advance func(d time.Duration)
 }
 
 // Factory constructs a fresh World per subtest.
 type Factory func() World
+
+// world returns the world with a guaranteed non-nil Advance.
+func world(f Factory) (ports.Repositories, ports.Transactor, func(time.Duration)) {
+	w := f()
+	advance := w.Advance
+	if advance == nil {
+		advance = func(time.Duration) {}
+	}
+	return w.Repos, w.Tx, advance
+}
 
 func fixedTime(offset int) time.Time {
 	return time.Date(2026, 8, 22, 12, 0, offset, 0, time.UTC)
