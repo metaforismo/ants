@@ -12,6 +12,22 @@ jobs:
   go:
     name: Go build, lint, tests
     runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: ants
+          POSTGRES_PASSWORD: ants
+          POSTGRES_DB: ants_ci
+        ports:
+          - 54329:5432
+        options: >-
+          --health-cmd "pg_isready -U ants"
+          --health-interval 2s
+          --health-timeout 5s
+          --health-retries 30
+    env:
+      TEST_PG_DSN: postgres://ants:ants@127.0.0.1:54329/ants_ci?sslmode=disable
     steps:
       - uses: actions/checkout@v4
 
@@ -39,7 +55,7 @@ jobs:
       - name: Manifest check
         run: go run ./scripts/manifestcheck
 
-      - name: Unit and contract tests
+      - name: Unit, contract, and PostgreSQL integration tests
         run: go test ./...
 
       - name: Race detector

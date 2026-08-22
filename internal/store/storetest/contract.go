@@ -6,6 +6,8 @@ package storetest
 
 import (
 	"context"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -85,13 +87,22 @@ func seedThread(ctx context.Context, t *testing.T, repos ports.Repositories, own
 }
 
 // Run executes the full contract against a fresh store instance per subtest.
+// Every adapter (memory today, PostgreSQL now and forever after) must pass
+// the exact same assertions.
 func Run(t *testing.T, newRepos NewReposFunc) {
 	t.Run("TenantCRUDAndSlugUniqueness", func(t *testing.T) { testTenantCRUD(t, newRepos()) })
 	t.Run("ThreadLifecycleWithOptimisticConcurrency", func(t *testing.T) { testThreadConcurrency(t, newRepos()) })
 	t.Run("RunIdempotencyKeyUniquePerThread", func(t *testing.T) { testRunIdempotency(t, newRepos()) })
+	t.Run("ConcurrentIdempotentRunCreationHasSingleWinner", func(t *testing.T) { testConcurrentIdempotentCreate(t, newRepos()) })
+	t.Run("ConcurrentTaskUpdatesHaveOneWinnerPerVersion", func(t *testing.T) { testConcurrentStaleWrites(t, newRepos()) })
 	t.Run("TaskVersionGuardRejectsStaleWrites", func(t *testing.T) { testTaskStaleWrite(t, newRepos()) })
+	t.Run("SpecVersioningPerThread", func(t *testing.T) { testSpecLifecycle(t, newRepos()) })
+	t.Run("IntegrationConnectionLifecycle", func(t *testing.T) { testIntegrationLifecycle(t, newRepos()) })
+	t.Run("AuditLogIsAppendOnlyAndTenantScoped", func(t *testing.T) { testAuditAppendOnly(t, newRepos()) })
+	t.Run("PolicyDecisionsRetrieveByRun", func(t *testing.T) { testPolicyDecisionRetrieval(t, newRepos()) })
 	t.Run("CrossTenantReadsAreUniformNotFound", func(t *testing.T) { testCrossTenantIsolation(t, newRepos()) })
 	t.Run("EventsCarryMonotonicCursorAndFilterByRun", func(t *testing.T) { testEventPagination(t, newRepos()) })
+	t.Run("PaginationBoundariesAreExactAtCursors", func(t *testing.T) { testPaginationBoundaries(t, newRepos()) })
 	t.Run("ArtifactsRoundTripContentAndDigest", func(t *testing.T) { testArtifactRoundTrip(t, newRepos()) })
 }
 
@@ -246,7 +257,9 @@ func testEventPagination(t *testing.T, repos ports.Repositories) {
 
 	var lastSeq int64 = -1
 	for i := range 5 {
+		idStr, _ := domain.NewID(domain.PrefixEvent)
 		evt := &domain.Event{
+			ID:            domain.EventID(idStr),
 			Type:          domain.EventRunStatusChanged,
 			TenantID:      tenantID,
 			AggregateType: "run",
@@ -322,3 +335,322 @@ func ErrKind(err error) domain.ErrorKind {
 }
 
 func try(f func() error) error { return f() }
+
+func testConcurrentIdempotentCreate(t *testing.T, repos ports.Repositories) {
+	ctx := context.Background()
+	seedTenant(ctx, t, repos, tenantID, "acme")
+	project := seedProject(ctx, t, repos, tenantID)
+	thread := seedThread(ctx, t, repos, tenantID, project.ID)
+
+	const contenders = 8
+	var wg sync.WaitGroup
+	var mu sync.Mutex
+	winners, conflicts := 0, 0
+	for range contenders {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			runIDStr, _ := domain.NewID(domain.PrefixRun)
+			run, _ := domain.NewRun(domain.RunID(runIDStr), tenantID, thread.ID, "race-key", fixedTime(6))
+			err := repos.Runs.Create(ctx, run)
+			mu.Lock()
+			defer mu.Unlock()
+			switch {
+			case err == nil:
+				winners++
+			case ErrKind(err) == domain.ErrKindConflict:
+				conflicts++
+			default:
+				t.Errorf("unexpected error kind: %v", err)
+			}
+		}()
+	}
+	wg.Wait()
+	if winners != 1 || conflicts != contenders-1 {
+		t.Fatalf("expected exactly one winner and %d conflicts, got %d/%d", contenders-1, winners, conflicts)
+	}
+	got, err := repos.Runs.GetByIdempotencyKey(ctx, tenantID, thread.ID, "race-key")
+	if err != nil {
+		t.Fatalf("winner must be retrievable: %v", err)
+	}
+	if got.Version != 1 {
+		t.Fatalf("winner must be the untouched first insert: v%d", got.Version)
+	}
+}
+
+// testConcurrentStaleWrites drives N writers through the same version step;
+// exactly one may win each generation, the rest must observe conflicts.
+func testConcurrentStaleWrites(t *testing.T, repos ports.Repositories) {
+	ctx := context.Background()
+	seedTenant(ctx, t, repos, tenantID, "acme")
+	project := seedProject(ctx, t, repos, tenantID)
+	thread := seedThread(ctx, t, repos, tenantID, project.ID)
+	_, run := seedRunAt(t, repos, thread)
+
+	taskIDStr, _ := domain.NewID(domain.PrefixTask)
+	task, err := domain.NewTask(domain.TaskID(taskIDStr), tenantID, run.ID, thread.ID, "contested", domain.TaskKindCodeChange, 0, nil, 3, fixedTime(5))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := repos.Tasks.Create(ctx, task); err != nil {
+		t.Fatal(err)
+	}
+
+	const writers = 6
+	base := *task
+	var wg sync.WaitGroup
+	wins := int64(0)
+	for i := range writers {
+		wg.Add(1)
+		go func(n int) {
+			defer wg.Done()
+			candidate := base
+			if n%2 == 0 {
+				candidate.Name = "writer-a"
+			} else {
+				candidate.Name = "writer-b"
+			}
+			if uerr := repos.Tasks.Update(ctx, &candidate, base.Version); uerr == nil {
+				atomic.AddInt64(&wins, 1)
+			} else if ErrKind(uerr) != domain.ErrKindConflict && ErrKind(uerr) != domain.ErrKindNotFound {
+				t.Errorf("unexpected update error: %v", uerr)
+			}
+		}(i)
+	}
+	wg.Wait()
+	if wins != 1 {
+		t.Fatalf("exactly one writer must win version %d, got %d", base.Version, wins)
+	}
+}
+
+// seedRunAt seeds a run for an existing thread.
+func seedRunAt(t *testing.T, repos ports.Repositories, thread *domain.Thread) (*domain.Thread, *domain.Run) {
+	ctx := context.Background()
+	runIDStr, _ := domain.NewID(domain.PrefixRun)
+	run, err := domain.NewRun(domain.RunID(runIDStr), tenantID, thread.ID, tid("key", "concurrent"), fixedTime(4))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := repos.Runs.Create(ctx, run); err != nil {
+		t.Fatalf("seed run: %v", err)
+	}
+	return thread, run
+}
+
+func testSpecLifecycle(t *testing.T, repos ports.Repositories) {
+	ctx := context.Background()
+	seedTenant(ctx, t, repos, tenantID, "acme")
+	project := seedProject(ctx, t, repos, tenantID)
+	thread := seedThread(ctx, t, repos, tenantID, project.ID)
+
+	specIDStr, _ := domain.NewID(domain.PrefixSpec)
+	content := domain.SpecContent{
+		Outcome:         "feature works",
+		Requirements:    []string{"r1", "r2"},
+		NonGoals:        []string{"n1"},
+		SuccessCriteria: []string{"c1"},
+		Blockers:        []string{},
+	}
+	spec, err := domain.NewSpec(domain.SpecID(specIDStr), tenantID, thread.ID, 1, content, fixedTime(5))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := repos.Specs.Create(ctx, spec); err != nil {
+		t.Fatalf("create spec: %v", err)
+	}
+	got, err := repos.Specs.Get(ctx, tenantID, spec.ID)
+	if err != nil {
+		t.Fatalf("get spec: %v", err)
+	}
+	if got.Content.Outcome != "feature works" || len(got.Content.Requirements) != 2 || len(got.Content.Blockers) != 0 {
+		t.Fatalf("spec round-trip mismatch: %+v", got.Content)
+	}
+	v2ID, _ := domain.NewID(domain.PrefixSpec)
+	v2Content := content
+	v2Content.Outcome = "feature works better"
+	v2, _ := domain.NewSpec(domain.SpecID(v2ID), tenantID, thread.ID, 2, v2Content, fixedTime(6))
+	if err := repos.Specs.Create(ctx, v2); err != nil {
+		t.Fatalf("create v2: %v", err)
+	}
+	latest, err := repos.Specs.LatestForThread(ctx, tenantID, thread.ID)
+	if err != nil || latest.Version != 2 || latest.Content.Outcome != "feature works better" {
+		t.Fatalf("latest must be v2: %+v %v", latest, err)
+	}
+	if _, err := repos.Specs.LatestForThread(ctx, otherTenID, thread.ID); ErrKind(err) != domain.ErrKindNotFound {
+		t.Fatalf("cross-tenant latest must be not-found, got %v", err)
+	}
+}
+
+func testIntegrationLifecycle(t *testing.T, repos ports.Repositories) {
+	ctx := context.Background()
+	seedTenant(ctx, t, repos, tenantID, "acme")
+
+	idStr, _ := domain.NewID(domain.PrefixIntegration)
+	conn, err := domain.NewIntegration(domain.IntegrationID(idStr), tenantID, domain.IntegrationGitHub,
+		[]string{"repo:read"}, tid("secret", "ref"), fixedTime(5))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := repos.Integrations.Create(ctx, conn); err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	expected := conn.Version
+	if err := conn.TransitionTo(domain.ConnectionConnected); err != nil {
+		t.Fatal(err)
+	}
+	if err := repos.Integrations.Update(ctx, conn, expected); err != nil {
+		t.Fatalf("update: %v", err)
+	}
+	stale := *conn
+	_ = stale.TransitionTo(domain.ConnectionRevoked)
+	if ErrKind(repos.Integrations.Update(ctx, &stale, expected)) != domain.ErrKindConflict {
+		t.Fatalf("stale integration write must conflict")
+	}
+	listed, err := repos.Integrations.ListByTenant(ctx, tenantID)
+	if err != nil || len(listed) != 1 || listed[0].Status != domain.ConnectionConnected {
+		t.Fatalf("list mismatch: %+v %v", listed, err)
+	}
+	if _, err := repos.Integrations.Get(ctx, otherTenID, conn.ID); ErrKind(err) != domain.ErrKindNotFound {
+		t.Fatalf("cross-tenant integration read must be not-found")
+	}
+}
+
+func testAuditAppendOnly(t *testing.T, repos ports.Repositories) {
+	ctx := context.Background()
+	seedTenant(ctx, t, repos, tenantID, "acme")
+	seedTenant(ctx, t, repos, otherTenID, "other")
+
+	for i := range 3 {
+		idStr, _ := domain.NewID(domain.PrefixAuditEvent)
+		evt := &domain.AuditEvent{
+			ID:           domain.AuditEventID(idStr),
+			TenantID:     tenantID,
+			Actor:        domain.Actor{Type: domain.PrincipalHuman, ID: string(principal)},
+			Action:       domain.ActionSandboxExec,
+			ResourceType: "sandbox",
+			ResourceID:   tid("sbx", "audit"),
+			Result:       domain.AuditResultAllowed,
+			Metadata:     map[string]any{"i": i},
+			At:           fixedTime(10 + i),
+		}
+		if err := repos.Audit.Append(ctx, evt); err != nil {
+			t.Fatalf("append %d: %v", i, err)
+		}
+	}
+
+	page, err := repos.Audit.ListByTenant(ctx, tenantID, "", 10)
+	if err != nil || len(page) != 3 {
+		t.Fatalf("list all: %d %v", len(page), err)
+	}
+	for i := 1; i < len(page); i++ {
+		if !page[i].At.After(page[i-1].At) {
+			t.Fatalf("append order not preserved at %d", i)
+		}
+	}
+	foreign, err := repos.Audit.ListByTenant(ctx, otherTenID, "", 10)
+	if err != nil || len(foreign) != 0 {
+		t.Fatalf("tenant scoping broken on audit log: %d %v", len(foreign), err)
+	}
+	limited, err := repos.Audit.ListByTenant(ctx, tenantID, string(page[0].ID), 10)
+	if err != nil || len(limited) != 2 || limited[0].ID == page[0].ID {
+		t.Fatalf("after-cursor audit pagination broken: %d", len(limited))
+	}
+}
+
+func testPolicyDecisionRetrieval(t *testing.T, repos ports.Repositories) {
+	ctx := context.Background()
+	seedTenant(ctx, t, repos, tenantID, "acme")
+	project := seedProject(ctx, t, repos, tenantID)
+	thread := seedThread(ctx, t, repos, tenantID, project.ID)
+	_, run := seedRunAt(t, repos, thread)
+
+	record := func(action domain.PolicyAction, outcome domain.PolicyOutcome) {
+		idStr, _ := domain.NewID(domain.PrefixPolicyDecision)
+		d := &domain.PolicyDecision{
+			ID:            domain.PolicyDecisionID(idStr),
+			TenantID:      tenantID,
+			Request:       domain.PolicyRequest{TenantID: tenantID, RunID: run.ID, Principal: principal, Action: action},
+			Outcome:       outcome,
+			Reason:        "contract test",
+			PolicyVersion: "policy.v1",
+			CreatedAt:     fixedTime(20),
+		}
+		if err := repos.PolicyDecisions.Record(ctx, d); err != nil {
+			t.Fatalf("record: %v", err)
+		}
+	}
+	record(domain.ActionSCMLocalCommit, domain.PolicyAllow)
+	record(domain.ActionNetworkAccess, domain.PolicyDeny)
+
+	byRun, err := repos.PolicyDecisions.ListByRun(ctx, tenantID, run.ID)
+	if err != nil || len(byRun) != 2 {
+		t.Fatalf("list by run: %d %v", len(byRun), err)
+	}
+	if byRun[0].Outcome == byRun[1].Outcome {
+		t.Fatalf("both outcomes should have been recorded distinctly")
+	}
+	if byRun[0].Request.TenantID != tenantID {
+		t.Fatalf("request tenant must round-trip")
+	}
+	foreign, err := repos.PolicyDecisions.ListByRun(ctx, otherTenID, run.ID)
+	if err != nil || len(foreign) != 0 {
+		t.Fatalf("cross-tenant decision read must be empty: %d %v", len(foreign), err)
+	}
+}
+
+func testPaginationBoundaries(t *testing.T, repos ports.Repositories) {
+	ctx := context.Background()
+	seedTenant(ctx, t, repos, tenantID, "acme")
+	project := seedProject(ctx, t, repos, tenantID)
+	thread := seedThread(ctx, t, repos, tenantID, project.ID)
+	_, run := seedRunAt(t, repos, thread)
+
+	var seqs []int64
+	for i := range 5 {
+		idStr, _ := domain.NewID(domain.PrefixEvent)
+		evt := &domain.Event{
+			ID:            domain.EventID(idStr),
+			Type:          domain.EventRunStatusChanged,
+			TenantID:      tenantID,
+			AggregateType: "run",
+			AggregateID:   string(run.ID),
+			RunID:         run.ID,
+			Data:          map[string]any{"i": i},
+		}
+		if err := repos.Events.Append(ctx, evt); err != nil {
+			t.Fatal(err)
+		}
+		seqs = append(seqs, evt.Seq)
+	}
+
+	cases := []struct {
+		name  string
+		after int64
+		limit int
+		want  int
+	}{
+		{"from start no limit", 0, 0, 5},
+		{"limit caps page", 0, 2, 2},
+		{"boundary after second seq", seqs[1], 0, 3},
+		{"boundary after last seq", seqs[4], 0, 0},
+		{"beyond max cursor", seqs[4] + 100, 0, 0},
+	}
+	for _, tc := range cases {
+		page, err := repos.Events.ListByRun(ctx, tenantID, run.ID, tc.after, tc.limit)
+		if err != nil {
+			t.Fatalf("%s: %v", tc.name, err)
+		}
+		if len(page) != tc.want {
+			t.Errorf("%s: got %d events, want %d", tc.name, len(page), tc.want)
+		}
+	}
+	// Message pagination shares cursor semantics.
+	msgs, total, err := repos.Threads.Messages(ctx, tenantID, thread.ID, 0, 0)
+	if err != nil || len(msgs) != 1 || total != 1 {
+		t.Fatalf("thread messages baseline: %d/%d %v", len(msgs), total, err)
+	}
+	none, total, err := repos.Threads.Messages(ctx, tenantID, thread.ID, msgs[0].Seq, 0)
+	if err != nil || len(none) != 0 || total != 1 {
+		t.Fatalf("messages past cursor must be empty with stable total: %d/%d %v", len(none), total, err)
+	}
+}

@@ -3,23 +3,22 @@ package migrate_test
 import (
 	"context"
 	"database/sql"
-	"os"
 	"testing"
 
 	_ "github.com/jackc/pgx/v5/stdlib"
 
 	"github.com/metaforismo/ants/internal/store/migrate"
+	"github.com/metaforismo/ants/internal/store/pgtestutil"
 )
 
 // TestMigrationsAgainstPostgres is the real-database evidence for the schema.
-// It is skipped unless ANTS_TEST_PG_DSN points at a disposable local
+// It is skipped unless TEST_PG_DSN points at a disposable local
 // database; scripts/test-postgres.sh provisions one via Docker.
 func TestMigrationsAgainstPostgres(t *testing.T) {
-	dsn := os.Getenv("ANTS_TEST_PG_DSN")
-	if dsn == "" {
-		t.Skip("ANTS_TEST_PG_DSN not set; start a disposable Postgres via scripts/test-postgres.sh")
-	}
+	adminDSN := pgtestutil.DSN(t)
 	ctx := context.Background()
+	dsn, cleanup := pgtestutil.IsolatedDatabase(ctx, t, adminDSN)
+	_ = cleanup
 	conn, err := sql.Open("pgx", dsn)
 	if err != nil {
 		t.Fatalf("open: %v", err)

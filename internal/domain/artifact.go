@@ -54,8 +54,9 @@ type Artifact struct {
 	ProducerTaskID TaskID         `json:"producer_task_id,omitempty"`
 	CreatedAt      time.Time      `json:"created_at"`
 
-	// Content is populated in memory-mode stores only; the Postgres adapter
-	// keeps content in object storage keyed by digest.
+	// Content travels with the record in single-node stores (memory and
+	// PostgreSQL BYTEA); object storage replaces it at scale, with the
+	// digest remaining the integrity anchor either way.
 	Content []byte `json:"-"`
 }
 

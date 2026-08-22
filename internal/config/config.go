@@ -89,10 +89,33 @@ type Server struct {
 	ShutdownTimeout Duration `yaml:"shutdown_timeout"`
 }
 
+// PostgresPool bounds the connection pool. Defaults are sized for a
+// single-node deployment; every value is validated at startup so a typo
+// cannot produce an unbounded or dead pool.
+type PostgresPool struct {
+	MaxOpenConns    int      `yaml:"max_open_conns"`
+	MaxIdleConns    int      `yaml:"max_idle_conns"`
+	ConnMaxLifetime Duration `yaml:"conn_max_lifetime"`
+}
+
+func (p PostgresPool) Validate() error {
+	if p.MaxOpenConns < 1 || p.MaxOpenConns > 200 {
+		return fmt.Errorf("store.pool.max_open_conns must be within [1,200], got %d", p.MaxOpenConns)
+	}
+	if p.MaxIdleConns < 1 || p.MaxIdleConns > p.MaxOpenConns {
+		return fmt.Errorf("store.pool.max_idle_conns must be within [1, max_open_conns], got %d", p.MaxIdleConns)
+	}
+	if p.ConnMaxLifetime.Duration < time.Second {
+		return fmt.Errorf("store.pool.conn_max_lifetime must be at least 1s, got %s", p.ConnMaxLifetime)
+	}
+	return nil
+}
+
 type Store struct {
-	Mode           StoreMode `yaml:"mode"`
-	PostgresDSNEnv string    `yaml:"-"` // populated from ANTS_STORE_POSTGRES_DSN only
-	PostgresDSN    Secret    `yaml:"-"`
+	Mode           StoreMode    `yaml:"mode"`
+	PostgresPool   PostgresPool `yaml:"pool"`
+	PostgresDSNEnv string       `yaml:"-"` // populated from ANTS_STORE_POSTGRES_DSN only
+	PostgresDSN    Secret       `yaml:"-"`
 }
 
 type Orchestrator struct {
@@ -147,6 +170,11 @@ func Defaults() Config {
 		},
 		Store: Store{
 			Mode: StoreModeMemory,
+			PostgresPool: PostgresPool{
+				MaxOpenConns:    10,
+				MaxIdleConns:    5,
+				ConnMaxLifetime: Duration{30 * time.Minute},
+			},
 		},
 		Orchestrator: Orchestrator{
 			MaxParallelTasks: 4,
@@ -188,6 +216,9 @@ func (c Config) Validate() error {
 	case StoreModePostgres:
 		if c.Store.PostgresDSN.Expose() == "" {
 			return fmt.Errorf("store.postgres_dsn is required when store.mode is postgres (set ANTS_STORE_POSTGRES_DSN)")
+		}
+		if err := c.Store.PostgresPool.Validate(); err != nil {
+			return err
 		}
 	case StoreModeMemory:
 	default:
@@ -314,6 +345,12 @@ func (c *Config) ApplyEnv(lookup LookupFunc) error {
 	if dsn, ok := lookup(envStorePostgresDSN); ok {
 		c.Store.PostgresDSN = Secret(dsn)
 	}
+	if err := intVar(envStorePgMaxOpen, &c.Store.PostgresPool.MaxOpenConns); err != nil {
+		return err
+	}
+	if err := intVar(envStorePgMaxIdle, &c.Store.PostgresPool.MaxIdleConns); err != nil {
+		return err
+	}
 	if err := intVar(envOrchMaxParallel, &c.Orchestrator.MaxParallelTasks); err != nil {
 		return err
 	}
@@ -374,6 +411,8 @@ const (
 	envServerDevAuth      = "ANTS_SERVER_DEV_AUTH"
 	envStoreMode          = "ANTS_STORE_MODE"
 	envStorePostgresDSN   = "ANTS_STORE_POSTGRES_DSN"
+	envStorePgMaxOpen     = "ANTS_STORE_POOL_MAX_OPEN_CONNS"
+	envStorePgMaxIdle     = "ANTS_STORE_POOL_MAX_IDLE_CONNS"
 	envOrchMaxParallel    = "ANTS_ORCHESTRATOR_MAX_PARALLEL_TASKS"
 	envOrchMaxTasksRun    = "ANTS_ORCHESTRATOR_MAX_TASKS_PER_RUN"
 	envOrchMaxExecOpsRun  = "ANTS_ORCHESTRATOR_MAX_EXEC_OPS_PER_RUN"
@@ -392,6 +431,7 @@ const (
 var knownEnvVars = map[string]bool{
 	envServerAddr: true, envServerDevAuth: true,
 	envStoreMode: true, envStorePostgresDSN: true,
+	envStorePgMaxOpen: true, envStorePgMaxIdle: true,
 	envOrchMaxParallel: true, envOrchMaxTasksRun: true, envOrchMaxExecOpsRun: true,
 	envOrchTaskTimeout: true, envOrchStageTimeout: true,
 	envOrchMaxAttempts: true, envOrchRetryBackoff: true,
