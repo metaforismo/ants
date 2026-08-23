@@ -161,7 +161,7 @@
         "pkce.code.challenge.method": "S256",
         "access.token.lifespan": "60"
       },
-      "defaultClientScopes": ["profile", "email"],
+      "defaultClientScopes": ["basic", "profile", "email"],
       "protocolMappers": [
         {
           "name": "ants-tenant",
