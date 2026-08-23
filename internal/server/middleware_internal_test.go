@@ -309,46 +309,28 @@ func TestPanicValueIsBoundedInLogs(t *testing.T) {
 
 // ---- correlation + remote class grammars ----
 
-func TestValidCorrelationID(t *testing.T) {
-	cases := map[string]bool{
-		"req_abc123":                           true,
-		"3f2504e0-4f89-11d3-9a0c-0305e82c3301": true,
-		"a.b_c~d:e@f-g":                        true,
-		"":                                     false,
-		strings.Repeat("a", 128):               true,
-		strings.Repeat("a", 129):               false,
-		"has space":                            false,
-		"new\nline":                            false,
-		"tab\there":                            false,
-		"sl/ash":                               false,
-		"unicodeé":                             false,
-	}
-	for input, want := range cases {
-		if got := validCorrelationID(input); got != want {
-			t.Errorf("validCorrelationID(%q) = %v, want %v", input, got, want)
-		}
-	}
-}
-
+// The acceptance grammar table itself is pinned by internal/correlation's
+// own suite since ADR-0018 moved the grammar there; this test pins only the
+// middleware's resolution behavior on top of it.
 func TestResolveCorrelationTruthfulSources(t *testing.T) {
 	req := httptest.NewRequest(http.MethodGet, "/", nil)
-	gen := resolveCorrelation(slog.New(slog.NewTextHandler(io.Discard, nil)), req)
-	if gen.source != correlationSourceGenerated || !strings.HasPrefix(gen.id, "req_") {
-		t.Errorf("absent header must generate req_ id with generated source, got %+v", gen)
+	genID, genSource := resolveCorrelation(slog.New(slog.NewTextHandler(io.Discard, nil)), req)
+	if genSource != correlationSourceGenerated || !strings.HasPrefix(string(genID), "req_") {
+		t.Errorf("absent header must generate req_ id with generated source, got %q/%q", genID, genSource)
 	}
 
 	req = httptest.NewRequest(http.MethodGet, "/", nil)
 	req.Header.Set(headerCorrelation, "external-trace.42")
-	got := resolveCorrelation(slog.New(slog.NewTextHandler(io.Discard, nil)), req)
-	if got.id != "external-trace.42" || got.source != correlationSourceHeader {
-		t.Errorf("valid inbound id must pass through as header-sourced, got %+v", got)
+	gotID, gotSource := resolveCorrelation(slog.New(slog.NewTextHandler(io.Discard, nil)), req)
+	if gotID != "external-trace.42" || gotSource != correlationSourceHeader {
+		t.Errorf("valid inbound id must pass through as header-sourced, got %q/%q", gotID, gotSource)
 	}
 
 	req = httptest.NewRequest(http.MethodGet, "/", nil)
 	req.Header.Set(headerCorrelation, "bad value\r\ninject")
-	got = resolveCorrelation(slog.New(slog.NewTextHandler(io.Discard, nil)), req)
-	if got.source != correlationSourceGenerated || strings.Contains(got.id, "bad") {
-		t.Errorf("malformed inbound id must be fully replaced, got %+v", got)
+	gotID, gotSource = resolveCorrelation(slog.New(slog.NewTextHandler(io.Discard, nil)), req)
+	if gotSource != correlationSourceGenerated || strings.Contains(string(gotID), "bad") {
+		t.Errorf("malformed inbound id must be fully replaced, got %q/%q", gotID, gotSource)
 	}
 }
 

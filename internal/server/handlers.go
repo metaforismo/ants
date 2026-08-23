@@ -8,6 +8,7 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/metaforismo/ants/internal/correlation"
 	"github.com/metaforismo/ants/internal/domain"
 	"github.com/metaforismo/ants/internal/orchestration"
 )
@@ -417,7 +418,8 @@ func queryInt64(r *http.Request, name string) int64 {
 
 // emitTenantEvent appends the tenant-created event; its durable outbox
 // delivery joins whatever unit the caller has open (ADR-0011), so a failure
-// rolls back together with the tenant insert.
+// rolls back together with the tenant insert. The trace_id slot carries the
+// request's correlation identifier when one is being served (ADR-0018).
 func (s *Server) emitTenantEvent(ctx context.Context, tenant *domain.Tenant) error {
 	id, err := domain.NewID(domain.PrefixEvent)
 	if err != nil {
@@ -430,6 +432,7 @@ func (s *Server) emitTenantEvent(ctx context.Context, tenant *domain.Tenant) err
 		TenantID:      tenant.ID,
 		AggregateType: "tenant",
 		AggregateID:   string(tenant.ID),
+		TraceID:       correlation.TraceID(ctx, ""),
 		Data: map[string]any{
 			"slug": tenant.Slug,
 			"plan": string(tenant.Plan),

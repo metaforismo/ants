@@ -10,6 +10,7 @@ import (
 	"net/netip"
 	"time"
 
+	"github.com/metaforismo/ants/internal/correlation"
 	"github.com/metaforismo/ants/internal/domain"
 )
 
@@ -30,40 +31,14 @@ const (
 	remoteUnknown  = "unknown"
 )
 
-// correlation is the request's trace identifier (ADR-0017). Source states
-// where it came from so logs never imply a client supplied an identifier
-// that was actually generated here.
-type correlation struct {
-	id     string
-	source string
-}
-
-// maxCorrelationIDLen bounds accepted header values; the acceptance grammar
-// admits external identifiers (UUIDs, foreign trace ids) while refusing
-// control characters, whitespace, quotes, and oversized input.
-const maxCorrelationIDLen = 128
-
-func validCorrelationID(v string) bool {
-	if v == "" || len(v) > maxCorrelationIDLen {
-		return false
-	}
-	for _, r := range v {
-		switch {
-		case r >= 'a' && r <= 'z', r >= 'A' && r <= 'Z', r >= '0' && r <= '9':
-		case r == '.' || r == '_' || r == '~' || r == ':' || r == '@' || r == '-':
-		default:
-			return false
-		}
-	}
-	return true
-}
-
 // resolveCorrelation honors a well-formed inbound X-Request-ID verbatim —
 // cross-system correlation — and generates a req_-prefixed identifier from
-// the same primitive events use for IDs otherwise.
-func resolveCorrelation(log *slog.Logger, r *http.Request) correlation {
-	if v := r.Header.Get(headerCorrelation); validCorrelationID(v) {
-		return correlation{id: v, source: correlationSourceHeader}
+// the same primitive events use for IDs otherwise. The acceptance grammar
+// lives in internal/correlation (ADR-0018) so the header echo, event
+// trace_id, audit correlation, and operator --trace-id cannot drift apart.
+func resolveCorrelation(log *slog.Logger, r *http.Request) (correlation.ID, string) {
+	if v := r.Header.Get(headerCorrelation); correlation.Valid(v) {
+		return correlation.ID(v), correlationSourceHeader
 	}
 	id, err := domain.NewID(domain.PrefixRequest)
 	if err != nil {
@@ -73,7 +48,7 @@ func resolveCorrelation(log *slog.Logger, r *http.Request) correlation {
 		log.Error("correlation id generation failed", "error", safeLogValue(err))
 		id = domain.PrefixRequest + "_generation_failed"
 	}
-	return correlation{id: id, source: correlationSourceGenerated}
+	return correlation.ID(id), correlationSourceGenerated
 }
 
 // remoteClass reduces the peer address to a bounded operational signal
@@ -175,8 +150,13 @@ func (s *Server) withRequestLog(route string, requiresAuth bool, next http.Handl
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		started := time.Now()
 		rec, writer := wrapWriter(w)
-		corr := resolveCorrelation(s.log, r)
-		writer.Header().Set(headerCorrelation, corr.id)
+		corrID, corrSource := resolveCorrelation(s.log, r)
+		writer.Header().Set(headerCorrelation, string(corrID))
+		// The carrier is produced exactly once, after trust-boundary
+		// resolution (ADR-0018): every downstream emission seam — events,
+		// audit — reads the identity echoed here. Auth denials and handler
+		// failures observe the same identifier as the happy path.
+		r = r.WithContext(correlation.With(r.Context(), corrID))
 
 		defer func() {
 			if s.metrics != nil {
@@ -192,8 +172,8 @@ func (s *Server) withRequestLog(route string, requiresAuth bool, next http.Handl
 				"route", route,
 				"status", rec.status,
 				"duration_ms", time.Since(started).Milliseconds(),
-				"request_id", corr.id,
-				"correlation_source", corr.source,
+				"request_id", string(corrID),
+				"correlation_source", corrSource,
 				"remote_class", remoteClass(r),
 			)
 		}()
@@ -204,7 +184,7 @@ func (s *Server) withRequestLog(route string, requiresAuth bool, next http.Handl
 			}
 			s.log.Error("panic recovered",
 				"route", route,
-				"request_id", corr.id,
+				"request_id", string(corrID),
 				"panic", fmtValue(recov),
 			)
 			// Only a response that has not started can truthfully become a

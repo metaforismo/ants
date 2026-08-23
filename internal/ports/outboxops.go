@@ -3,6 +3,7 @@ package ports
 import (
 	"time"
 
+	"github.com/metaforismo/ants/internal/correlation"
 	"github.com/metaforismo/ants/internal/domain"
 )
 
@@ -86,7 +87,10 @@ type OutboxMutationRequest struct {
 
 // Validate rejects structurally unusable mutations before they reach a
 // store. Dead rows always carry generation >= 1 because entering dead bumps
-// it, so credentials below that bound cannot match anything.
+// it, so credentials below that bound cannot match anything. A non-empty
+// TraceID must satisfy the shared correlation grammar (ADR-0018): operator
+// provenance lands in durable event and audit records and can never carry
+// unvalidated bytes.
 func (r OutboxMutationRequest) Validate() error {
 	if err := validateTenantID(r.TenantID); err != nil {
 		return err
@@ -102,6 +106,9 @@ func (r OutboxMutationRequest) Validate() error {
 	}
 	if len(r.Reason) > maxOperatorFreeText {
 		return domain.Invalidf("outbox_reason", "reason must be at most %d characters", maxOperatorFreeText)
+	}
+	if r.TraceID != "" && !correlation.Valid(r.TraceID) {
+		return domain.Invalidf("outbox_trace_id", "trace id must be 1-%d characters of [A-Za-z0-9._~:@-]", correlation.MaxLength)
 	}
 	return nil
 }
