@@ -119,4 +119,9 @@ export ANTS_E2E_ISSUER="http://127.0.0.1:$KC_PORT/realms/$REALM"
 status=0
 pnpm exec playwright test "$@" || status=$?
 
+if [ "$status" -ne 0 ]; then
+  echo "--- console server log tail (diagnostics) ---"
+  tail -40 "$WORK/web.log" 2>/dev/null || true
+fi
+
 exit "$status"

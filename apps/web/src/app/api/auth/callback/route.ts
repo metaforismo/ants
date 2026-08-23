@@ -23,8 +23,22 @@ export const dynamic = "force-dynamic";
  */
 export async function GET(request: Request): Promise<Response> {
   const cfg = getWebConfig();
+  // All protocol redirects stay on the validated configured origin. Next
+  // may normalize the request's Host (loopback forms collapse to
+  // "localhost"), and following request.url would bounce the browser across
+  // cookie-scoped origins mid-flow.
   const fail = (key: string) =>
-    NextResponse.redirect(new URL(`/login?error=${encodeURIComponent(key)}`, request.url));
+    NextResponse.redirect(new URL(`/login?error=${encodeURIComponent(key)}`, cfg.webUrl));
+
+  // The authorization request carried redirect_uri from cfg.webUrl; the
+  // exchange must present byte-identical redirect_uri or the provider
+  // refuses with invalid_grant. Rebuilding from the validated origin (not
+  // request.url, whose host may be normalized) keeps both sides equal.
+  const callbackUrl = new URL("/api/auth/callback", cfg.webUrl);
+  const incoming = new URL(request.url);
+  for (const [key, value] of incoming.searchParams) {
+    callbackUrl.searchParams.set(key, value);
+  }
 
   const tx = await readAuthTransaction<{
     state: string;
@@ -38,7 +52,7 @@ export async function GET(request: Request): Promise<Response> {
 
   try {
     const config = await clientConfiguration();
-    const tokens = await oidc.authorizationCodeGrant(config, new URL(request.url), {
+    const tokens = await oidc.authorizationCodeGrant(config, callbackUrl, {
       pkceCodeVerifier: tx.codeVerifier,
       expectedState: tx.state,
       expectedNonce: tx.nonce,
