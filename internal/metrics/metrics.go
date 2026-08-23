@@ -40,6 +40,9 @@ type Metrics struct {
 	outboxDelivered      prometheus.Counter
 	outboxRetryScheduled prometheus.Counter
 	outboxDeadLettered   prometheus.Counter
+	// outboxOperatorActions instruments the dead-letter operator surface
+	// (ADR-0015); labels are the fixed action and outcome vocabularies.
+	outboxOperatorActions *prometheus.CounterVec
 
 	workerClaimsAcquired prometheus.Counter
 	workerRunsFinished   *prometheus.CounterVec
@@ -79,7 +82,7 @@ func New() *Metrics {
 			prometheus.GaugeOpts{
 				Namespace: namespace,
 				Name:      "outbox_messages",
-				Help:      "Outbox messages by delivery state (pending, leased, delivered, dead), sampled after each dispatch round's lease step.",
+				Help:      "Outbox messages by delivery state (pending, leased, delivered, dead, discarded), sampled after each dispatch round's lease step.",
 			},
 			[]string{"state"},
 		),
@@ -118,6 +121,14 @@ func New() *Metrics {
 				Help:      "Messages that exhausted their delivery budget and became terminal.",
 			},
 		),
+		outboxOperatorActions: prometheus.NewCounterVec(
+			prometheus.CounterOpts{
+				Namespace: namespace,
+				Name:      "outbox_operator_actions_total",
+				Help:      "Dead-letter operator mutations (requeue, discard) by action and outcome.",
+			},
+			[]string{"action", "outcome"},
+		),
 		workerClaimsAcquired: prometheus.NewCounter(
 			prometheus.CounterOpts{
 				Namespace: namespace,
@@ -154,6 +165,7 @@ func New() *Metrics {
 		m.outboxDelivered,
 		m.outboxRetryScheduled,
 		m.outboxDeadLettered,
+		m.outboxOperatorActions,
 		m.workerClaimsAcquired,
 		m.workerRunsFinished,
 		m.workerRunsConverged,
@@ -194,6 +206,7 @@ func (m *Metrics) OutboxStates(states ports.OutboxStats) {
 	m.outboxMessages.WithLabelValues("leased").Set(float64(states.Leased))
 	m.outboxMessages.WithLabelValues("delivered").Set(float64(states.Delivered))
 	m.outboxMessages.WithLabelValues("dead").Set(float64(states.Dead))
+	m.outboxMessages.WithLabelValues("discarded").Set(float64(states.Discarded))
 }
 
 // Delivered records one acknowledged delivery (outbox.Observer).
@@ -219,4 +232,11 @@ func (m *Metrics) RunFinished(outcome string) {
 // is "interrupted" or "exhausted" (worker.Observer).
 func (m *Metrics) RunConverged(kind string) {
 	m.workerRunsConverged.WithLabelValues(kind).Inc()
+}
+
+// ActionRecorded records one dead-letter operator mutation outcome
+// (outboxops.Observer). action and outcome are fixed vocabularies owned by
+// the outboxops package; identifiers never become labels.
+func (m *Metrics) ActionRecorded(action, outcome string) {
+	m.outboxOperatorActions.WithLabelValues(action, outcome).Inc()
 }

@@ -16,7 +16,7 @@ type outboxMessage struct {
 	DedupKey    string
 	TenantID    domain.TenantID
 	Envelope    []byte
-	Status      string
+	Status      domain.OutboxDeliveryStatus
 	Attempts    int
 	MaxAttempts int
 	AvailableAt time.Time
@@ -25,6 +25,11 @@ type outboxMessage struct {
 	LastError   string
 	CreatedAt   time.Time
 	DeliveredAt *time.Time
+	// Generation fences operator mutations (ADR-0015): it increments on
+	// every transition into dead, requeued-pending, or discarded.
+	Generation  int64
+	DeadAt      *time.Time
+	DiscardedAt *time.Time
 }
 
 type OutboxRepository struct{ st *storeState }
@@ -48,7 +53,7 @@ func (r *OutboxRepository) Publish(_ context.Context, msg ports.OutboxMessage) e
 		DedupKey:    msg.DedupKey,
 		TenantID:    msg.TenantID,
 		Envelope:    append([]byte(nil), msg.Envelope...),
-		Status:      "pending",
+		Status:      domain.OutboxPending,
 		Attempts:    0,
 		MaxAttempts: msg.MaxAttempts,
 		AvailableAt: now,
@@ -70,9 +75,9 @@ func (r *OutboxRepository) Lease(_ context.Context, req ports.OutboxLeaseRequest
 	var due []*outboxMessage
 	for _, m := range r.st.outbox {
 		switch {
-		case m.Status == "pending" && !m.AvailableAt.After(now):
+		case m.Status == domain.OutboxPending && !m.AvailableAt.After(now):
 			due = append(due, m)
-		case m.Status == "leased" && m.LeaseUntil != nil && !m.LeaseUntil.After(now):
+		case m.Status == domain.OutboxLeased && m.LeaseUntil != nil && !m.LeaseUntil.After(now):
 			due = append(due, m)
 		}
 	}
@@ -83,7 +88,7 @@ func (r *OutboxRepository) Lease(_ context.Context, req ports.OutboxLeaseRequest
 	out := make([]ports.OutboxMessage, 0, len(due))
 	leaseUntil := now.Add(req.LeaseFor)
 	for _, m := range due {
-		m.Status = "leased"
+		m.Status = domain.OutboxLeased
 		m.LeasedBy = req.WorkerID
 		m.LeaseUntil = &leaseUntil
 		m.Attempts++
@@ -100,12 +105,12 @@ func (r *OutboxRepository) MarkDelivered(_ context.Context, id, leasedBy string)
 	unlock := lockWrite(r.st)
 	defer unlock()
 	m, ok := r.st.outboxByID[id]
-	if !ok || m.Status != "leased" || m.LeasedBy != leasedBy {
+	if !ok || m.Status != domain.OutboxLeased || m.LeasedBy != leasedBy {
 		// Uniform not-found keeps lease ownership non-enumerable.
-		return domain.NotFoundf("outbox message", id)
+		return domain.NotFoundf("outbox_message", id)
 	}
 	now := r.st.clock.Now().UTC()
-	m.Status = "delivered"
+	m.Status = domain.OutboxDelivered
 	m.DeliveredAt = &now
 	m.LeaseUntil = nil
 	return nil
@@ -115,14 +120,17 @@ func (r *OutboxRepository) FailWithBackoff(_ context.Context, id, leasedBy strin
 	unlock := lockWrite(r.st)
 	defer unlock()
 	m, ok := r.st.outboxByID[id]
-	if !ok || m.Status != "leased" || m.LeasedBy != leasedBy {
-		return domain.NotFoundf("outbox message", id)
+	if !ok || m.Status != domain.OutboxLeased || m.LeasedBy != leasedBy {
+		return domain.NotFoundf("outbox_message", id)
 	}
 	now := r.st.clock.Now().UTC()
 	if m.Attempts >= m.MaxAttempts {
-		m.Status = "dead"
+		m.Status = domain.OutboxDead
+		// Entering dead opens a new operator-visible fencing epoch.
+		m.Generation++
+		m.DeadAt = &now
 	} else {
-		m.Status = "pending"
+		m.Status = domain.OutboxPending
 		m.AvailableAt = now.Add(retryIn)
 	}
 	m.LeaseUntil = nil
@@ -141,15 +149,179 @@ func (r *OutboxRepository) Stats(_ context.Context) (ports.OutboxStats, error) {
 	var stats ports.OutboxStats
 	for _, m := range r.st.outbox {
 		switch m.Status {
-		case "pending":
+		case domain.OutboxPending:
 			stats.Pending++
-		case "leased":
+		case domain.OutboxLeased:
 			stats.Leased++
-		case "delivered":
+		case domain.OutboxDelivered:
 			stats.Delivered++
-		case "dead":
+		case domain.OutboxDead:
 			stats.Dead++
+		case domain.OutboxDiscarded:
+			stats.Discarded++
 		}
 	}
 	return stats, nil
+}
+
+// ListDeadLetters pages actionable (dead) messages in deterministic
+// (created_at, id) order behind the request's keyset cursor. Discarded rows
+// are history, not work: they appear through Get, never here.
+func (r *OutboxRepository) ListDeadLetters(_ context.Context, req ports.ListDeadLettersRequest) ([]ports.DeadLetterSummary, error) {
+	if err := req.Validate(); err != nil {
+		return nil, err
+	}
+	unlock := lockRead(r.st)
+	defer unlock()
+	dead := make([]*outboxMessage, 0, len(r.st.outbox))
+	for _, m := range r.st.outbox {
+		if m.Status == domain.OutboxDead && m.TenantID == req.TenantID {
+			dead = append(dead, m)
+		}
+	}
+	sort.Slice(dead, func(i, j int) bool {
+		if !dead[i].CreatedAt.Equal(dead[j].CreatedAt) {
+			return dead[i].CreatedAt.Before(dead[j].CreatedAt)
+		}
+		return dead[i].ID < dead[j].ID
+	})
+	out := []ports.DeadLetterSummary{}
+	for _, m := range dead {
+		if afterKeyset(m.CreatedAt, m.ID, req.AfterCreatedAt, req.AfterID) {
+			continue
+		}
+		out = append(out, deadLetterSummary(m))
+		if len(out) >= req.Limit {
+			break
+		}
+	}
+	return out, nil
+}
+
+// GetDeadLetter returns one dead or discarded message so operators can
+// confirm terminal decisions landed; anything else is uniformly not-found.
+func (r *OutboxRepository) GetDeadLetter(_ context.Context, tenantID domain.TenantID, messageID string) (*ports.DeadLetterSummary, error) {
+	unlock := lockRead(r.st)
+	defer unlock()
+	m, ok := r.st.outboxByID[messageID]
+	if !ok || m.TenantID != tenantID ||
+		(m.Status != domain.OutboxDead && m.Status != domain.OutboxDiscarded) {
+		return nil, domain.NotFoundf("outbox_message", messageID)
+	}
+	s := deadLetterSummary(m)
+	return &s, nil
+}
+
+func (r *OutboxRepository) RequeueDeadLetter(_ context.Context, req ports.OutboxMutationRequest) (ports.OutboxMutationResult, error) {
+	if err := req.Validate(); err != nil {
+		return ports.OutboxMutationResult{}, err
+	}
+	unlock := lockWrite(r.st)
+	defer unlock()
+	m, ok := r.st.outboxByID[req.MessageID]
+	if !ok || m.TenantID != req.TenantID {
+		return ports.OutboxMutationResult{}, domain.NotFoundf("outbox_message", req.MessageID)
+	}
+	before := m.Attempts
+	if err := classifyOperatorMutation(m, domain.OutboxPending, req); err != nil {
+		return ports.OutboxMutationResult{}, err
+	}
+	now := r.st.clock.Now().UTC()
+	applyRequeue(m, now)
+	return ports.OutboxMutationResult{
+		MessageID:      m.ID,
+		Action:         "requeue",
+		AttemptsBefore: before,
+		Generation:     m.Generation,
+	}, nil
+}
+
+func (r *OutboxRepository) DiscardDeadLetter(_ context.Context, req ports.OutboxMutationRequest) (ports.OutboxMutationResult, error) {
+	if err := req.Validate(); err != nil {
+		return ports.OutboxMutationResult{}, err
+	}
+	unlock := lockWrite(r.st)
+	defer unlock()
+	m, ok := r.st.outboxByID[req.MessageID]
+	if !ok || m.TenantID != req.TenantID {
+		return ports.OutboxMutationResult{}, domain.NotFoundf("outbox_message", req.MessageID)
+	}
+	before := m.Attempts
+	if err := classifyOperatorMutation(m, domain.OutboxDiscarded, req); err != nil {
+		return ports.OutboxMutationResult{}, err
+	}
+	now := r.st.clock.Now().UTC()
+	applyDiscard(m, now)
+	return ports.OutboxMutationResult{
+		MessageID:      m.ID,
+		Action:         "discard",
+		AttemptsBefore: before,
+		Generation:     m.Generation,
+	}, nil
+}
+
+// classifyOperatorMutation turns precondition misses into typed errors:
+// a row outside the operator lifecycle entirely (generation 0 — never died,
+// so never an operator target) is an invalid transition whatever credential
+// arrives; on lifecycle rows a mismatched compare-and-swap credential wins
+// the diagnosis because "your view is stale" is the actionable truth.
+func classifyOperatorMutation(m *outboxMessage, target domain.OutboxDeliveryStatus, req ports.OutboxMutationRequest) error {
+	if m.Generation == 0 {
+		return domain.NewInvalidTransitionError(m.Status, target)
+	}
+	if m.Generation != req.ExpectedGeneration {
+		return domain.NewStaleVersionError("outbox message", m.ID, req.ExpectedGeneration, m.Generation)
+	}
+	if m.Status != domain.OutboxDead {
+		return domain.NewInvalidTransitionError(m.Status, target)
+	}
+	return nil
+}
+
+func applyRequeue(m *outboxMessage, now time.Time) {
+	// Reset exactly what a fresh bounded delivery lifecycle needs; identity,
+	// dedup key, envelope, max_attempts, and last_error stay untouched.
+	m.Status = domain.OutboxPending
+	m.Attempts = 0
+	m.AvailableAt = now
+	m.LeaseUntil = nil
+	m.LeasedBy = ""
+	m.Generation++
+	m.DeadAt = nil
+}
+
+func applyDiscard(m *outboxMessage, now time.Time) {
+	m.Status = domain.OutboxDiscarded
+	m.LeaseUntil = nil
+	m.LeasedBy = ""
+	m.Generation++
+	m.DiscardedAt = &now
+}
+
+// afterKeyset reports whether a row sorts at-or-before the cursor position
+// and must therefore be skipped on a subsequent page.
+func afterKeyset(createdAt time.Time, id string, afterAt time.Time, afterID string) bool {
+	if afterID == "" && afterAt.IsZero() {
+		return false
+	}
+	if createdAt.Equal(afterAt) {
+		return id <= afterID
+	}
+	return createdAt.Before(afterAt)
+}
+
+func deadLetterSummary(m *outboxMessage) ports.DeadLetterSummary {
+	return ports.DeadLetterSummary{
+		ID:          m.ID,
+		DedupKey:    m.DedupKey,
+		TenantID:    m.TenantID,
+		Status:      m.Status,
+		Attempts:    m.Attempts,
+		MaxAttempts: m.MaxAttempts,
+		Generation:  m.Generation,
+		Cause:       m.LastError,
+		CreatedAt:   m.CreatedAt,
+		DeadAt:      m.DeadAt,
+		DiscardedAt: m.DiscardedAt,
+	}
 }

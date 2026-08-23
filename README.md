@@ -13,9 +13,14 @@ verification commands. On top of it, execution is durable: state transitions,
 events, and their deliveries commit atomically (unit of work + transactional
 outbox), runs are dispatched through tenant-scoped run claims with fencing and
 bounded retries by a process-level worker, and the server exposes honest
-readiness, loopback-confined dev auth, and bounded HTTP lifecycles.
+readiness, loopback-confined dev auth, bounded HTTP lifecycles, and Prometheus
+metrics with fixed-vocabulary labels. Dead-lettered deliveries are operable:
+`ants outbox dead-letter list/show/requeue/discard` inspects poison messages
+and restarts or terminally discards them under a compare-and-swap fencing
+credential, with every intervention committed as event + delivery + audit in
+one unit of work (ADR-0015).
 
-Read the [master plan](docs/MASTER_PLAN.md) for the complete product and implementation strategy. The condensed [resources index](docs/RESOURCES.md) links directly to the repositories, documentation, papers, and product research that accelerate development. Architecture decisions live in [docs/adr](docs/adr); the current implementation state and its proof matrix live in [docs/TRANCHE_2_FINAL_EVIDENCE.md](docs/TRANCHE_2_FINAL_EVIDENCE.md), with per-tranche records alongside (latest: [Tranche 3.1 metrics platform](docs/TRANCHE_3_1_EVIDENCE.md)).
+Read the [master plan](docs/MASTER_PLAN.md) for the complete product and implementation strategy. The condensed [resources index](docs/RESOURCES.md) links directly to the repositories, documentation, papers, and product research that accelerate development. Architecture decisions live in [docs/adr](docs/adr); the current implementation state and its proof matrix live in [docs/TRANCHE_3_2_EVIDENCE.md](docs/TRANCHE_3_2_EVIDENCE.md), with per-tranche records alongside (latest: [Tranche 3.2 outbox dead-letter operations](docs/TRANCHE_3_2_EVIDENCE.md)).
 
 ## Quick start
 
@@ -36,6 +41,9 @@ curl -s localhost:8080/healthz
 The process also exposes Prometheus metrics at `/metrics` on the same
 listener (aggregate operational series with fixed-vocabulary labels; disable
 with `metrics.enabled: false`, see ADR-0014).
+
+Poisoned deliveries are operated through the CLI (see
+[docs/runbooks/outbox-operations.md](docs/runbooks/outbox-operations.md)).
 
 The API is specified by [openapi/v1/openapi.yaml](openapi/v1/openapi.yaml); TypeScript types are generated into `packages/contracts`.
 

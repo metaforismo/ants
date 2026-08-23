@@ -43,6 +43,8 @@ func Main(args []string, stdout, stderr io.Writer) int {
 		return RunServe(args[1:], stdout, stderr)
 	case "demo":
 		return runDemo(args[1:], stdout, stderr)
+	case "outbox":
+		return runOutbox(args[1:], stdout, stderr)
 	case "help", "-h", "--help":
 		usage(stdout)
 		return exitOK
@@ -65,6 +67,7 @@ Commands:
   migrate up       apply PostgreSQL migrations (requires store.mode postgres)
   serve            start the /v1 API server
   demo run         execute the deterministic vertical slice locally
+  outbox           dead-letter inspection, requeue, and discard (ADR-0015)
 
 Use "ants <command> -h" for command-specific flags.
 `)

@@ -67,6 +67,14 @@ Initial instrument set (closed; extend only with reviewed intent):
   `ants_worker_runs_converged_total{kind}`;
 - Go runtime and process collectors under the same registry.
 
+Amendment (2026-08-23, reviewed with ADR-0015): one counter family joins the
+closed set through the same observer seam —
+`ants_outbox_operator_actions_total{action,outcome}` with action ∈ {requeue,
+discard} and outcome ∈ {succeeded, stale_credential, invalid_state,
+not_found, invalid_request, failed}; identifiers never become labels. The
+existing `ants_outbox_messages{state}` gauge gains the `discarded` state
+sample.
+
 ## Consequences
 
 - Every later subsystem (integrations, scheduler, sandbox drivers) adds its
