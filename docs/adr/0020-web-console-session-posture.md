@@ -28,9 +28,13 @@ Actors this design defends against:
 1. **Malicious website driving a logged-in browser (CSRF)** — forged
    cross-site mutations are refused twice: cookies are `SameSite=Lax` (not
    attached to cross-site POSTs) *and* every mutating BFF route requires the
-   `Origin` header to match the validated public origin or the request's own
-   `Host`. Logout — the one route a top-level cross-site form could reach —
-   applies the same check.
+   `Origin` header to equal the validated public origin. The request's own
+   `Host` header is deliberately never an acceptance criterion: an attacker
+   controlling both headers — the DNS-rebinding shape — can make them agree,
+   while the Authorization Code flow already pins every legitimate browser
+   to the configured origin byte-exactly through its registered
+   `redirect_uri`. Logout — the one route a top-level cross-site form could
+   reach — applies the same check.
 2. **XSS attempting credential theft** — there is nothing to steal from
    client JavaScript: access/refresh/ID tokens live only inside an
    `HttpOnly` sealed cookie and server memory for the duration of a request.

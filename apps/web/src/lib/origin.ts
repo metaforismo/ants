@@ -20,13 +20,17 @@ export function safeRedirectPath(value: string | null | undefined): string | und
 /**
  * Same-origin enforcement for mutating BFF routes (the CSRF posture on top
  * of SameSite=Lax cookies): a browser always attaches Origin to cross-site
- * POSTs, so requiring it to match the validated public origin — or the
- * Host the request itself carries — rejects forged mutations without a
- * second token round-trip.
+ * POSTs, so requiring it to equal the validated public origin rejects
+ * forged mutations without a second token round-trip. Acceptance is keyed
+ * exclusively to the configured origin — never to the request's own Host,
+ * which an attacker controlling both headers (DNS rebinding) can match at
+ * will. Legitimate reachability of that origin is already guaranteed: the
+ * Authorization Code flow's redirect_uri is derived from ANTS_WEB_URL and
+ * matched byte-exactly by the provider, so every user who completed login
+ * was serving from exactly this origin.
  */
 export function isSameOrigin(request: Request, allowedOrigins: string[]): boolean {
   const origin = request.headers.get("origin");
-  const host = request.headers.get("host");
   if (!origin) return false;
   let parsed: URL;
   try {
@@ -34,9 +38,5 @@ export function isSameOrigin(request: Request, allowedOrigins: string[]): boolea
   } catch {
     return false;
   }
-  if (allowedOrigins.includes(parsed.origin)) return true;
-  // The deployment may legitimately serve under a different advertised host
-  // than ANTS_WEB_URL behind a local proxy; matching the request's own Host
-  // keeps that honest while still refusing every foreign origin.
-  return host !== null && parsed.host === host && (parsed.protocol === "http:" || parsed.protocol === "https:");
+  return allowedOrigins.includes(parsed.origin);
 }

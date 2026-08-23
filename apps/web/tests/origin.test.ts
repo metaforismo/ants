@@ -32,22 +32,30 @@ describe("isSameOrigin", () => {
     return new Request("http://console.local:3100/api/v1/projects", { headers });
   }
 
-  it("accepts the validated public origin and the request's own host", () => {
+  it("accepts exactly the validated public origin", () => {
     expect(isSameOrigin(requestWith("http://console.local:3100"), ["http://console.local:3100"])).toBe(true);
-    // Behind a local proxy the advertised origin may differ from any
-    // validated entry, but the request's own Host still names this app.
-    expect(isSameOrigin(requestWith("http://advertised:3100", "advertised:3100"), [])).toBe(true);
   });
 
-  it("rejects cross-site forgeries and missing origins", () => {
+  it("refuses cross-site forgeries and missing origins", () => {
     expect(isSameOrigin(requestWith("https://evil.example"), ["http://console.local:3100"])).toBe(false);
     expect(isSameOrigin(requestWith(null), ["http://console.local:3100"])).toBe(false);
     expect(isSameOrigin(requestWith("not a url"), [])).toBe(false);
   });
 
-  it("does not accept a foreign origin merely because the Host header repeats it", () => {
-    // Origin must still be a well-formed http(s) URL matching the host the
-    // request itself carries; a mismatched pair stays rejected.
+  it("never accepts a hostile origin merely because the Host header repeats it", () => {
+    // Audit regression (DNS-rebinding shape): an attacker controlling both
+    // headers can make them agree; only the validated configured origin is
+    // ever accepted.
+    expect(isSameOrigin(requestWith("https://evil.example", "evil.example"), [])).toBe(false);
+    expect(isSameOrigin(requestWith("https://console.local", "advertised.local"), [])).toBe(false);
+    expect(isSameOrigin(requestWith("https://evil.example", "evil.example"), ["http://console.local:3100"])).toBe(false);
+  });
+
+  it("does not accept foreign schemes or hosts behind any header agreement", () => {
     expect(isSameOrigin(requestWith("ftp://console.local:3100"), [])).toBe(false);
+    // A deployment served under a host other than ANTS_WEB_URL must fix its
+    // configuration; the console refuses rather than trusting the request's
+    // own Host claim.
+    expect(isSameOrigin(requestWith("http://advertised:3100", "advertised:3100"), [])).toBe(false);
   });
 });

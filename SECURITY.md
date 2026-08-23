@@ -51,8 +51,10 @@ networks.
   access/refresh/ID tokens exist only inside an AES-256-GCM-sealed `HttpOnly`
   cookie and server memory; no token has a code path into client JavaScript,
   storage, or URLs (the session probe returns identity metadata only).
-  Mutating BFF routes require same-origin (`Origin` must match the validated
-  public origin or the request's own `Host`) on top of `SameSite=Lax`
+   Mutating BFF routes require same-origin (`Origin` must equal the
+   validated public origin; the request's own `Host` header is never
+   trusted as an acceptance criterion, so a DNS-rebinding pair of forged
+   headers cannot pass) on top of `SameSite=Lax`
   cookies; post-login redirects accept relative in-app paths only; login
   binds `state`, PKCE S256 verifier, and `nonce` in a single-use sealed
   transaction cleared before exchange; refresh renewals are serialized so
