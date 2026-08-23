@@ -4,6 +4,7 @@ import type {
   Message,
   Project,
   Run,
+  RunPage,
   RunReport,
   Task,
   Thread,
@@ -117,6 +118,7 @@ export type ProjectListResponse = { projects: Project[] };
 export type ThreadListResponse = { threads: Thread[] };
 export type MessagePageResponse = { messages: Message[]; total: number };
 export type EventPageResponse = { events: Event[] };
+export type RunPageResponse = RunPage;
 export type RunWithTasksResponse = { run: Run; tasks: Task[] };
 
 export const api = {
@@ -140,6 +142,11 @@ export const api = {
   // protection matters today (start-run); the BFF forwards it verbatim.
   startRun: (threadId: string, key: string) =>
     request<Run>(`threads/${encodeURIComponent(threadId)}/runs`, { method: "POST", idempotencyKey: key }),
+  // Oldest-first stable order; the newest run is the last element.
+  listThreadRuns: (threadId: string, after: number) =>
+    request<RunPageResponse>(
+      `threads/${encodeURIComponent(threadId)}/runs?after=${after}`,
+    ),
   getRunWithTasks: (runId: string) =>
     request<RunWithTasksResponse>(`runs/${encodeURIComponent(runId)}`),
   listRunEvents: (runId: string, after: number) =>

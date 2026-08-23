@@ -41,7 +41,7 @@ test.describe("operate journey", () => {
       timeout: 15_000,
     });
 
-    // --- start the run; the panel anchors to its id ---
+    // --- start the run; the workspace discovers it from the run history ---
     await page.getByTestId("start-run").click();
     await expect(page.getByTestId("run-panel")).toBeVisible({ timeout: 20_000 });
 
