@@ -8,6 +8,7 @@ import (
 	"context"
 	"fmt"
 
+	"github.com/metaforismo/ants/internal/correlation"
 	"github.com/metaforismo/ants/internal/domain"
 	"github.com/metaforismo/ants/internal/ports"
 )
@@ -142,6 +143,7 @@ func (e *Engine) appendAudit(ctx context.Context, d *domain.PolicyDecision) erro
 		ResourceType: "policy_decision",
 		ResourceID:   string(d.ID),
 		Result:       result,
+		TraceID:      correlation.TraceID(ctx, ""),
 		Metadata: map[string]any{
 			"outcome":        string(d.Outcome),
 			"policy_version": d.PolicyVersion,

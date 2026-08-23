@@ -11,6 +11,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/metaforismo/ants/internal/correlation"
 	"github.com/metaforismo/ants/internal/domain"
 	"github.com/metaforismo/ants/internal/planner"
 	"github.com/metaforismo/ants/internal/policy"
@@ -277,6 +278,10 @@ func (e *Engine) emitEvent(ctx context.Context, event *domain.Event) error {
 	}
 	event.ID = domain.EventID(id)
 	event.OccurredAt = e.deps.Clock.Now().UTC()
+	// Request-scoped work carries its correlation id into the envelope's
+	// trace_id slot; worker/dispatcher contexts carry none and leave it
+	// empty rather than fabricating an identity (ADR-0018).
+	event.TraceID = correlation.TraceID(ctx, event.TraceID)
 	return e.deps.Events.Append(ctx, event)
 }
 

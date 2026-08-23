@@ -30,13 +30,20 @@ logs one structured, redacted line — normalized route pattern, status,
 duration, correlation id (honored from `X-Request-ID` when well-formed,
 generated otherwise, always echoed), and a bounded remote class; raw paths,
 query strings, headers, bodies, identifiers, secrets, and client addresses
-have no code path into logs (ADR-0017). Alert-ready PromQL baselines over
-the closed metric set live in the runbooks, and at-least-once outbox
-delivery across a hard process kill is proven by an automated
-restart-convergence test against disposable PostgreSQL — redelivery without
-duplicated logical effects.
+have no code path into logs (ADR-0017). The effective correlation id flows
+through the application seam into the `trace_id` slot of every event
+committed while serving that request — response header, log line, and event
+history join on one identifier; audit records follow the same rule whenever
+one is written (none are synchronous to HTTP today) — while work
+outside any request (worker execution, dispatch, retention) keeps empty
+trace ids and operator actions carry their explicit `--trace-id`
+(ADR-0018). Alert-ready PromQL baselines over the closed metric set live in
+the runbooks, and at-least-once outbox delivery across a hard process kill
+is proven by an automated restart-convergence test against disposable
+PostgreSQL — redelivery without duplicated logical effects and with
+correlation history byte-identical across the crash.
 
-Read the [master plan](docs/MASTER_PLAN.md) for the complete product and implementation strategy. The condensed [resources index](docs/RESOURCES.md) links directly to the repositories, documentation, papers, and product research that accelerate development. Architecture decisions live in [docs/adr](docs/adr); the current implementation state and its proof matrix live in [docs/TRANCHE_3_4_EVIDENCE.md](docs/TRANCHE_3_4_EVIDENCE.md), with per-tranche records alongside (latest: [Tranche 3.4 request logging + restart hardening](docs/TRANCHE_3_4_EVIDENCE.md)).
+Read the [master plan](docs/MASTER_PLAN.md) for the complete product and implementation strategy. The condensed [resources index](docs/RESOURCES.md) links directly to the repositories, documentation, papers, and product research that accelerate development. Architecture decisions live in [docs/adr](docs/adr); the current implementation state and its proof matrix live in [docs/TRANCHE_3_5_EVIDENCE.md](docs/TRANCHE_3_5_EVIDENCE.md), with per-tranche records alongside (latest: [Tranche 3.5 request↔event correlation propagation](docs/TRANCHE_3_5_EVIDENCE.md)).
 
 ## Quick start
 

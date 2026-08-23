@@ -54,10 +54,12 @@ response echoes exactly the identifier actually used, under the retained
 contract for zero diagnostic gain).
 
 Propagation of a request's correlation id into the `trace_id` of events the
-request emits is deliberately **deferred**: it requires context plumbing
-through the orchestration engine and every store write path, which is engine
-work, not middleware work. Until then the vocabularies align but do not yet
-flow; nothing pretends otherwise.
+request emits was deliberately **deferred** here: it requires context
+plumbing through the orchestration engine and every store write path, which
+is engine work, not middleware work. Update (2026-08-23, ADR-0018): that
+deferral is now closed by the typed application-seam carrier — request-scoped
+events and audit records carry the effective correlation id in their existing
+`trace_id` slot; non-request writes keep empty ids.
 
 ### Request-log field contract (fixed, low-cardinality, redacted)
 
@@ -158,8 +160,9 @@ verifiable via outbox row states in SQL.
 
 OpenTelemetry tracing, log shipping configuration, alert *evaluation*
 infrastructure (baselines are documentation over the closed metric set),
-multi-instance dispatch, authenticated operator APIs, request-to-event
-trace_id propagation, new Prometheus instruments, new dependencies.
+multi-instance dispatch, authenticated operator APIs, new Prometheus
+instruments, new dependencies. Request-to-event trace_id propagation was
+out of scope here and is now specified by ADR-0018.
 
 ## Alternatives considered
 
@@ -188,5 +191,6 @@ trace_id propagation, new Prometheus instruments, new dependencies.
   pinned by tests, so future SSE/stream surfaces need no middleware rework.
 - Restart convergence moves from documentation claim to executed proof on
   real PostgreSQL, with the harness isolated from production code.
-- Deferred unchanged (named so they resurface): request→event trace_id
-  propagation, OTel export, alert evaluation tooling, multi-node dispatcher.
+- Deferred unchanged (named so they resurface): OTel export, alert evaluation
+  tooling, multi-node dispatcher. Request→event trace_id propagation was
+  closed by ADR-0018.

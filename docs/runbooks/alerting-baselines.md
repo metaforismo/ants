@@ -16,6 +16,28 @@ Windows of 5m suit fast signals; 1h windows suit slow accumulations.
 Ratios over low traffic are unstable — see the denominator caveats per
 section.
 
+## 0. Investigating with correlation ids
+
+Metrics say *that* something happened; correlation ids say *which request*.
+Every served request resolves one identifier (ADR-0017/0018) that appears in
+four joinable places: the `X-Request-ID` response header, the request log's
+`request_id` field, the `trace_id` of every event committed while serving
+the request, and any audit record written in that window. Operator actions
+join through their explicit `--trace-id` instead. Work performed outside a
+request (worker execution, dispatch, retention) intentionally keeps empty
+trace ids — an empty slot means "not request-caused", not "lost".
+
+Investigation path for a 5xx burst, dead-letter spike, or odd event:
+grab the id from one surface (log line or client-reported header) and query
+the others:
+
+```sql
+SELECT type, aggregate_type, aggregate_id, occurred_at
+  FROM events WHERE trace_id = '<id>';
+SELECT action, resource_type, result, at
+  FROM audit_events WHERE trace_id = '<id>';
+```
+
 ## 1. Dead-letter growth (page)
 
 A dead letter is a message that exhausted its delivery budget; it never
