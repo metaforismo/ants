@@ -4,7 +4,7 @@ import * as oidc from "openid-client";
 import { getWebConfig } from "@/lib/config";
 import { clientConfiguration } from "@/lib/oidc";
 import { isSameOrigin } from "@/lib/origin";
-import { clearSession, readRawSession } from "@/lib/session";
+import { clearSession } from "@/lib/session";
 
 export const dynamic = "force-dynamic";
 
@@ -13,7 +13,9 @@ export const dynamic = "force-dynamic";
  * the browser to the provider's end-session endpoint (metadata-derived) so
  * the IdP session dies too. The local session is cleared even when provider
  * metadata is unreachable — logout must never depend on logout succeeding
- * somewhere else.
+ * somewhere else. No id_token_hint is sent: the ID token is deliberately not
+ * stored (cookie budget, ADR-0020), so the provider may ask the user to
+ * confirm ending its session.
  */
 export async function POST(request: Request): Promise<Response> {
   const cfg = getWebConfig();
@@ -29,17 +31,10 @@ export async function POST(request: Request): Promise<Response> {
     );
   }
 
-  let idToken: string | undefined;
-  try {
-    idToken = (await readRawSession())?.idToken;
-  } catch {
-    // An unusable session still logs out locally; no hint is required.
-  }
   await clearSession();
 
   try {
     const endSession = oidc.buildEndSessionUrl(await clientConfiguration(), {
-      ...(idToken ? { id_token_hint: idToken } : {}),
       post_logout_redirect_uri: new URL("/", cfg.webUrl).toString(),
     });
     return NextResponse.redirect(endSession.toString());

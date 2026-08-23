@@ -119,9 +119,12 @@ posture (ADR-0004).
 
 **RP-initiated logout, local-first.** `POST /api/auth/logout` (origin-
 checked) destroys the local cookie unconditionally, then redirects to the
-discovery-derived end-session endpoint with `id_token_hint` when available.
-Back-channel logout, front-channel iframe cleanup, and provider-side session
-sweeping are not implemented.
+discovery-derived end-session endpoint without `id_token_hint` — the ID
+token is deliberately not stored, keeping the sealed session inside the
+browsers' ~4 KiB per-cookie budget (writeSession enforces it loudly); the
+provider may ask the user to confirm ending its session. Back-channel
+logout, front-channel iframe cleanup, and provider-side session sweeping
+are not implemented.
 
 **Tenant bootstrap at first login.** Until memberships ship, the first
 login under a new tenant claim creates the tenant through the documented

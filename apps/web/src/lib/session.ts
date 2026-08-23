@@ -17,11 +17,18 @@ import { seal, unseal } from "@/lib/seal";
 const SESSION_TTL_SECONDS = 8 * 60 * 60;
 /** Refresh the access token this many seconds before its real expiry. */
 const RENEW_LEEWAY_SECONDS = 45;
+/**
+ * Browsers silently refuse cookies beyond ~4 KiB, which would surface as a
+ * mysteriously sessionless console. The budget leaves room for name and
+ * attributes; writeSession fails loudly instead of overflowing it. The ID
+ * token is therefore NOT stored (it exists only as an optional logout hint)
+ * — see ADR-0020.
+ */
+const MAX_COOKIE_VALUE_BYTES = 3800;
 
 export type SessionData = {
   accessToken: string;
   refreshToken?: string;
-  idToken?: string;
   /** Epoch seconds at which the access token expires (provider-issued). */
   tokenExpiresAt: number;
   sub: string;
@@ -50,8 +57,16 @@ function cookieOptions(maxAge: number) {
 }
 
 export async function writeSession(session: SessionData): Promise<void> {
+  const sealed = seal(JSON.stringify(session), getWebConfig().sessionKey);
+  if (Buffer.byteLength(sealed, "utf8") > MAX_COOKIE_VALUE_BYTES) {
+    // Fail loudly: a silently dropped cookie would present as an endless
+    // login loop, never as an actionable operator error.
+    throw new Error(
+      `sealed session is ${Buffer.byteLength(sealed, "utf8")} bytes, over the ${MAX_COOKIE_VALUE_BYTES}-byte cookie budget; shorten provider token lifetimes or claims`,
+    );
+  }
   const store = await cookies();
-  store.set(SESSION_COOKIE, seal(JSON.stringify(session), getWebConfig().sessionKey), {
+  store.set(SESSION_COOKIE, sealed, {
     ...cookieOptions(SESSION_TTL_SECONDS),
   });
 }
@@ -87,8 +102,7 @@ function isSessionData(value: unknown): value is SessionData {
     typeof s.username === "string" &&
     typeof s.tenantSlug === "string" &&
     typeof s.createdAt === "number" &&
-    (s.refreshToken === undefined || typeof s.refreshToken === "string") &&
-    (s.idToken === undefined || typeof s.idToken === "string")
+    (s.refreshToken === undefined || typeof s.refreshToken === "string")
   );
 }
 
@@ -148,7 +162,6 @@ export async function loadFreshSession(): Promise<LoadedSession> {
       accessToken: tokens.access_token,
       refreshToken:
         typeof tokens.refresh_token === "string" ? tokens.refresh_token : latest.refreshToken,
-      idToken: typeof tokens.id_token === "string" ? tokens.id_token : latest.idToken,
       tokenExpiresAt: epochAfter(tokens.expiresIn()),
     };
     await writeSession(next);
@@ -184,7 +197,6 @@ export function sessionFromTokens(identity: IdentityFromTokens, tokens: TokenSet
   return {
     accessToken: tokens.access_token,
     refreshToken: typeof tokens.refresh_token === "string" ? tokens.refresh_token : undefined,
-    idToken: typeof tokens.id_token === "string" ? tokens.id_token : undefined,
     tokenExpiresAt: epochAfter(tokens.expiresIn()),
     sub: identity.sub,
     username: identity.username,
