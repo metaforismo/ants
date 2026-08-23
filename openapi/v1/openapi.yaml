@@ -256,6 +256,42 @@ paths:
           $ref: "#/components/responses/Problem"
 
   /v1/threads/{id}/runs:
+    get:
+      tags: [runs]
+      summary: List the runs of a thread
+      description: |
+        Runs are returned oldest first in creation order, keyed by the
+        store-assigned per-thread `seq`: the sequence is allocated exactly
+        once when the run is created and never changes, so it is immutable
+        and append-stable by construction — independent of what any clock
+        did between insertions. Pages are keyset-paginated: pass the last
+        observed run's `seq` back as `after`, and pages fetched with
+        increasing cursors never duplicate or skip, even when concurrent
+        starts grow `total` between page requests or a clock rollback makes
+        a later-created row carry an earlier created_at. The newest run is
+        therefore the last item of the final page, not of the first one —
+        clients wanting the true latest must walk pages until they have
+        consumed `total` entries (the console does exactly this; it must not
+        assume any single bounded page holds the latest run). A known thread
+        without runs yields an empty `runs` array, never an error; an unknown
+        or foreign-tenant thread yields the uniform 404 problem (no existence
+        oracle, ADR-0004).
+      operationId: listThreadRuns
+      security: [{ bearerAuth: [] }]
+      parameters:
+        - $ref: "#/components/parameters/ThreadID"
+        - $ref: "#/components/parameters/AfterCursor"
+      responses:
+        "200":
+          description: One bounded page of the thread's runs with the total count
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/RunPage"
+        "401":
+          $ref: "#/components/responses/Problem"
+        "404":
+          $ref: "#/components/responses/Problem"
     post:
       tags: [runs]
       summary: |
@@ -468,7 +504,18 @@ components:
       name: after
       in: query
       required: false
-      description: Return entries with cursor strictly greater than this value
+      description: |
+        Return entries whose sequence number is strictly greater than this
+        value in the listing's stable ascending order. Which sequence the
+        value belongs to is fixed per listing: thread runs use the
+        per-thread run sequence assigned by the store at creation time,
+        thread messages use the per-thread message sequence, and run events
+        use the tenant's event sequence. The grammar is exactly this schema
+        (integer, minimum 0, default 0): omitted means 0; a present value
+        must be a single decimal-digit integer (no sign, whitespace, or
+        other padding) within the int64 range. Repeated, empty, or malformed
+        values are rejected with problem code `invalid_cursor` rather than
+        silently falling back to the default.
       schema:
         type: integer
         format: int64
@@ -723,7 +770,7 @@ components:
 
     Run:
       type: object
-      required: [id, tenant_id, thread_id, status, idempotency_key, task_ids, version, created_at, updated_at]
+      required: [id, tenant_id, thread_id, status, idempotency_key, seq, task_ids, version, created_at, updated_at]
       properties:
         id: { $ref: "#/components/schemas/RunID" }
         tenant_id: { $ref: "#/components/schemas/TenantID" }
@@ -731,6 +778,14 @@ components:
         spec_id: { $ref: "#/components/schemas/SpecID" }
         status: { $ref: "#/components/schemas/RunStatus" }
         idempotency_key: { type: string }
+        seq:
+          type: integer
+          format: int64
+          minimum: 1
+          description: |
+            Store-assigned per-thread sequence number, strictly increasing in
+            creation order and immutable afterwards. Pass the last run's seq
+            back as `after` to continue walking the history exactly there.
         task_ids:
           type: array
           items: { $ref: "#/components/schemas/TaskID" }
@@ -750,6 +805,20 @@ components:
         tasks:
           type: array
           items: { $ref: "#/components/schemas/Task" }
+
+    RunPage:
+      type: object
+      description: One keyset page of a thread's run history in creation order
+      required: [runs, total]
+      properties:
+        runs:
+          type: array
+          items: { $ref: "#/components/schemas/Run" }
+        total:
+          type: integer
+          format: int64
+          minimum: 0
+          description: Total number of runs recorded for the thread
 
     Actor:
       type: object

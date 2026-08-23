@@ -7,6 +7,7 @@ package storetest
 import (
 	"context"
 	"errors"
+	"fmt"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -133,6 +134,26 @@ func Run(t *testing.T, f Factory) {
 	t.Run("RunIdempotencyKeyUniquePerThread", func(t *testing.T) {
 		repos, _ := world()
 		testRunIdempotency(t, repos)
+	})
+	t.Run("RunListByThreadIsTenantScopedStableAndPaginated", func(t *testing.T) {
+		repos, _ := world()
+		testRunListByThread(t, repos)
+	})
+	t.Run("RunListBoundedTraversalCoversLongHistoryExactlyOnce", func(t *testing.T) {
+		repos, _ := world()
+		testRunListBoundedTraversal(t, repos)
+	})
+	t.Run("RunListConcurrentTailGrowthNeverDuplicates", func(t *testing.T) {
+		repos, _ := world()
+		testRunListConcurrentTailGrowth(t, repos)
+	})
+	t.Run("RunCreationOnUnknownThreadIsTypedInvalid", func(t *testing.T) {
+		repos, _ := world()
+		testRunCreateOnUnknownThread(t, repos)
+	})
+	t.Run("MessageAppendOnUnknownThreadIsUniformNotFound", func(t *testing.T) {
+		repos, _ := world()
+		testAppendMessageOnUnknownThread(t, repos)
 	})
 	t.Run("ConcurrentIdempotentRunCreationHasSingleWinner", func(t *testing.T) {
 		repos, _ := world()
@@ -393,6 +414,393 @@ func testRunIdempotency(t *testing.T, repos ports.Repositories) {
 	}
 }
 
+// seedRunForKey creates one run on the given thread with a distinct
+// idempotency key and creation instant.
+func seedRunForKey(t *testing.T, repos ports.Repositories, thread *domain.Thread, key string, at time.Time) *domain.Run {
+	t.Helper()
+	ctx := context.Background()
+	idStr, _ := domain.NewID(domain.PrefixRun)
+	run, err := domain.NewRun(domain.RunID(idStr), thread.TenantID, thread.ID, key, at)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := repos.Runs.Create(ctx, run); err != nil {
+		t.Fatalf("seed run %s: %v", key, err)
+	}
+	return run
+}
+
+// testRunListByThread pins the read contract behind GET /v1/threads/{id}/runs:
+// only the caller's own runs come back, oldest first in the store-assigned
+// per-thread sequence order (true creation order), honoring the keyset
+// cursor and limit. A run appended between two page requests — even one
+// whose created_at is backdated by a clock rollback — lands strictly after
+// every sequence the reader has consumed and causes no duplicate or missing
+// entry for a reader walking increasing cursors. Foreign or unknown threads
+// are uniformly not-found (ADR-0004) while a known empty thread yields an
+// empty page.
+func testRunListByThread(t *testing.T, repos ports.Repositories) {
+	ctx := context.Background()
+	seedTenant(ctx, t, repos, tenantID, "acme")
+	seedTenant(ctx, t, repos, otherTenID, "other")
+	project := seedProject(ctx, t, repos, tenantID)
+	foreignProject := seedForeignProject(ctx, t, repos, otherTenID)
+
+	thread := seedThreadAt(ctx, t, repos, tenantID, project.ID, "runs thread", fixedTime(2))
+	foreignThread := seedThreadAt(ctx, t, repos, otherTenID, foreignProject.ID, "foreign thread", fixedTime(2))
+	emptyThread := seedThreadAt(ctx, t, repos, tenantID, project.ID, "empty thread", fixedTime(3))
+
+	// Creation instants are deliberately NOT monotonic with insertion: the
+	// sequence is the only ordering authority, so a backdated timestamp
+	// must not influence position.
+	first := seedRunForKey(t, repos, thread, "list-1", fixedTime(20))
+	second := seedRunForKey(t, repos, thread, "list-2", fixedTime(10))
+	// Identical timestamps must still yield one deterministic order on
+	// every store implementation: insertion order, i.e. ascending seq.
+	tieA := seedRunForKey(t, repos, thread, "tie-a", fixedTime(30))
+	tieB := seedRunForKey(t, repos, thread, "tie-b", fixedTime(30))
+	newest := seedRunForKey(t, repos, thread, "list-newest", fixedTime(40))
+	seedRunForKey(t, repos, foreignThread, "foreign", fixedTime(15))
+
+	wantOrder := []domain.RunID{first.ID, second.ID, tieA.ID, tieB.ID, newest.ID}
+
+	list, total, err := repos.Runs.ListByThread(ctx, tenantID, thread.ID, 0, 0)
+	if err != nil || total != 5 {
+		t.Fatalf("full list: %d runs, total %d, err %v", len(list), total, err)
+	}
+	for i, want := range wantOrder {
+		if list[i].ID != want {
+			t.Fatalf("position %d = %s, want %s (insertion order)", i, list[i].ID, want)
+		}
+		if i > 0 && list[i].Seq <= list[i-1].Seq {
+			t.Fatalf("sequences must be strictly increasing in listing order: %d then %d", list[i-1].Seq, list[i].Seq)
+		}
+	}
+	if list[0].Seq < 1 {
+		t.Fatalf("store must assign positive sequences, got %d", list[0].Seq)
+	}
+
+	page, total, err := repos.Runs.ListByThread(ctx, tenantID, thread.ID, 0, 2)
+	if err != nil || total != 5 || len(page) != 2 {
+		t.Fatalf("limited first page: %d runs, total %d, err %v", len(page), total, err)
+	}
+	if page[0].ID != wantOrder[0] || page[1].ID != wantOrder[1] {
+		t.Fatalf("limit must keep the earliest entries in order: %+v", page)
+	}
+
+	resumeAfter := page[1].Seq
+
+	beyond, total, err := repos.Runs.ListByThread(ctx, tenantID, thread.ID, int64(len(wantOrder))+100, 0)
+	if err != nil || total != 5 || len(beyond) != 0 {
+		t.Fatalf("beyond-max cursor must be an empty page: %d/%d %v", len(beyond), total, err)
+	}
+
+	// The release-blocker regression: a run inserted BETWEEN two page
+	// requests whose created_at predates everything already listed (clock
+	// rollback). Its sequence still sorts it at the tail, so the resuming
+	// reader neither sees it early nor loses any unread run.
+	appended := seedRunForKey(t, repos, thread, "list-backdated-midwalk", fixedTime(1))
+	resumed, total, err := repos.Runs.ListByThread(ctx, tenantID, thread.ID, resumeAfter, 0)
+	if err != nil || total != 6 || len(resumed) != 4 {
+		t.Fatalf("resume after backdated append: %d runs, total %d, err %v", len(resumed), total, err)
+	}
+	wantResumed := []domain.RunID{tieA.ID, tieB.ID, newest.ID, appended.ID}
+	for i, want := range wantResumed {
+		if resumed[i].ID != want {
+			t.Fatalf("resumed position %d = %s, want %s (backdated append must land at the tail)", i, resumed[i].ID, want)
+		}
+	}
+	seen := map[domain.RunID]bool{}
+	for _, run := range page {
+		seen[run.ID] = true
+	}
+	for _, run := range resumed {
+		if seen[run.ID] {
+			t.Fatalf("backdated tail append produced duplicate %s across page requests", run.ID)
+		}
+		seen[run.ID] = true
+	}
+	if len(seen) != 6 {
+		t.Fatalf("walk across the append must cover all 6 runs exactly once, saw %d", len(seen))
+	}
+
+	empty, total, err := repos.Runs.ListByThread(ctx, tenantID, emptyThread.ID, 0, 0)
+	if err != nil || total != 0 || len(empty) != 0 || empty == nil {
+		t.Fatalf("known thread without runs must list an empty non-nil page: %d/%d %v", len(empty), total, err)
+	}
+
+	crossTenantErr := try(func() error {
+		_, _, err := repos.Runs.ListByThread(ctx, otherTenID, thread.ID, 0, 0)
+		return err
+	})
+	if ErrKind(crossTenantErr) != domain.ErrKindNotFound {
+		t.Fatalf("foreign-tenant list must be uniform not-found, got %v", crossTenantErr)
+	}
+	missingErr := try(func() error {
+		_, _, err := repos.Runs.ListByThread(ctx, tenantID, domain.ThreadID(tid("thr", "missingthread000000")), 0, 0)
+		return err
+	})
+	if ErrKind(missingErr) != domain.ErrKindNotFound {
+		t.Fatalf("unknown-thread list must be uniform not-found, got %v", missingErr)
+	}
+}
+
+// testRunListBoundedTraversal walks a history comfortably above one server
+// page (>200 runs) through keyset cursors and requires exact once coverage
+// in strict sequence order, with the final seeded run last.
+func testRunListBoundedTraversal(t *testing.T, repos ports.Repositories) {
+	ctx := context.Background()
+	seedTenant(ctx, t, repos, tenantID, "acme")
+	project := seedProject(ctx, t, repos, tenantID)
+	thread := seedThreadAt(ctx, t, repos, tenantID, project.ID, "long history thread", fixedTime(2))
+
+	const count = 205
+	const pageSize = 32
+	wantIDs := make([]domain.RunID, 0, count)
+	base := time.Date(2027, 1, 1, 0, 0, 0, 0, time.UTC)
+	for i := 0; i < count; i++ {
+		run := seedRunForKey(t, repos, thread, fmt.Sprintf("long-%03d", i),
+			base.Add(time.Duration(count-i)*time.Second)) // timestamps descend; insertion order is authoritative
+		wantIDs = append(wantIDs, run.ID)
+	}
+
+	var cursor int64
+	gotIDs := make([]domain.RunID, 0, count)
+	prevSeq := int64(0)
+	pages := 0
+	for {
+		page, total, err := repos.Runs.ListByThread(ctx, tenantID, thread.ID, cursor, pageSize)
+		if err != nil {
+			t.Fatalf("page at cursor %d: %v", cursor, err)
+		}
+		if int64(len(gotIDs)) > total {
+			t.Fatalf("total %d dropped below the %d entries already consumed", total, len(gotIDs))
+		}
+		pages++
+		if pages > 1 && len(page) == 0 && int64(len(gotIDs)) < total {
+			t.Fatalf("empty page at cursor %d with %d runs outstanding", cursor, total-int64(len(gotIDs)))
+		}
+		for _, run := range page {
+			if run.Seq <= prevSeq {
+				t.Fatalf("sequence regressed across pages: %d after %d", run.Seq, prevSeq)
+			}
+			prevSeq = run.Seq
+			cursor = run.Seq
+			gotIDs = append(gotIDs, run.ID)
+		}
+		if int64(len(gotIDs)) >= count {
+			break
+		}
+		if pages > count/pageSize+4 {
+			t.Fatalf("traversal did not terminate: %d pages for %d runs", pages, count)
+		}
+	}
+	if len(gotIDs) != count {
+		t.Fatalf("walked history must cover all %d runs exactly once, saw %d", count, len(gotIDs))
+	}
+	for i := range wantIDs {
+		if gotIDs[i] != wantIDs[i] {
+			t.Fatalf("history position %d = %s, want %s", i, gotIDs[i], wantIDs[i])
+		}
+	}
+	full, total, err := repos.Runs.ListByThread(ctx, tenantID, thread.ID, 0, 0)
+	if err != nil || total != count || len(full) != count {
+		t.Fatalf("unbounded list: %d runs, total %d, err %v", len(full), total, err)
+	}
+}
+
+// testRunListConcurrentTailGrowth creates runs from several goroutines while
+// a single-threaded reader walks keyset pages, requiring that the reader
+// never observes a duplicate or a sequence regression mid-growth, and that
+// one final walk after the writers settle covers every run exactly once in
+// sequence order.
+func testRunListConcurrentTailGrowth(t *testing.T, repos ports.Repositories) {
+	ctx := context.Background()
+	seedTenant(ctx, t, repos, tenantID, "acme")
+	project := seedProject(ctx, t, repos, tenantID)
+	thread := seedThreadAt(ctx, t, repos, tenantID, project.ID, "concurrent growth thread", fixedTime(2))
+
+	const writers = 6
+	const perWriter = 12
+	const totalRuns = writers * perWriter
+
+	writerErrs := make(chan error, writers)
+	writerDone := make(chan struct{})
+	var wg sync.WaitGroup
+	at := fixedTime(50)
+	for w := 0; w < writers; w++ {
+		wg.Add(1)
+		go func(w int) {
+			defer wg.Done()
+			for i := 0; i < perWriter; i++ {
+				idStr, err := domain.NewID(domain.PrefixRun)
+				if err != nil {
+					writerErrs <- err
+					return
+				}
+				run, err := domain.NewRun(domain.RunID(idStr), tenantID, thread.ID,
+					fmt.Sprintf("growth-%d-%02d", w, i), at)
+				if err != nil {
+					writerErrs <- err
+					return
+				}
+				if err := repos.Runs.Create(ctx, run); err != nil {
+					writerErrs <- fmt.Errorf("writer %d item %d: %w", w, i, err)
+					return
+				}
+			}
+		}(w)
+	}
+	go func() {
+		wg.Wait()
+		close(writerDone)
+	}()
+
+	seen := make(map[domain.RunID]bool)
+	var cursor int64
+	settled := false
+	for walks := 0; !settled; walks++ {
+		if walks > 16*totalRuns {
+			t.Fatalf("concurrent walk failed to converge: saw %d of %d runs", len(seen), totalRuns)
+		}
+		page, total, err := repos.Runs.ListByThread(ctx, tenantID, thread.ID, cursor, 4)
+		if err != nil {
+			t.Fatalf("concurrent walk at cursor %d: %v", cursor, err)
+		}
+		for _, run := range page {
+			if seen[run.ID] {
+				t.Fatalf("concurrent growth produced duplicate %s at cursor %d", run.ID, cursor)
+			}
+			if run.Seq <= cursor {
+				t.Fatalf("sequence regressed during concurrent growth: %d at cursor %d", run.Seq, cursor)
+			}
+			seen[run.ID] = true
+			cursor = run.Seq
+		}
+		select {
+		case <-writerDone:
+			// Every creation attempt has landed; the count is final and any
+			// outstanding entry must surface on the next page, so the walk
+			// either progresses or has hit a real defect.
+			if int64(len(seen)) == total && total == totalRuns {
+				settled = true
+			} else if len(page) == 0 {
+				var writerErr error
+				select {
+				case writerErr = <-writerErrs:
+				default:
+				}
+				t.Fatalf("walk stalled with writers settled: saw %d of %d (total %d); first writer error: %v",
+					len(seen), totalRuns, total, writerErr)
+			}
+		default:
+			if len(page) == 0 {
+				// Writers still running and no new tail entries since the
+				// last read: yield instead of busy-spinning, so a starved
+				// scheduler can never burn through the convergence budget
+				// before the writers land their creations.
+				time.Sleep(time.Millisecond)
+			}
+		}
+	}
+	select {
+	case err := <-writerErrs:
+		t.Fatalf("concurrent creator failed: %v", err)
+	default:
+	}
+
+	final, total, err := repos.Runs.ListByThread(ctx, tenantID, thread.ID, 0, 0)
+	if err != nil || total != totalRuns || len(final) != totalRuns {
+		t.Fatalf("final full list: %d runs, total %d, err %v", len(final), total, err)
+	}
+	prev := int64(0)
+	for _, run := range final {
+		if !seen[run.ID] {
+			t.Fatalf("settled walk missed run %s (seq %d)", run.ID, run.Seq)
+		}
+		if run.Seq <= prev {
+			t.Fatalf("final list sequences not strictly increasing: %d after %d", run.Seq, prev)
+		}
+		prev = run.Seq
+	}
+}
+
+// testRunCreateOnUnknownThread pins the typed rejection both adapters must
+// produce when a run references a thread that does not exist in the run's
+// tenant: invalid_request with code run_thread_unknown, never a leaked
+// foreign-key failure or a silent orphan insert.
+func testRunCreateOnUnknownThread(t *testing.T, repos ports.Repositories) {
+	ctx := context.Background()
+	seedTenant(ctx, t, repos, tenantID, "acme")
+
+	idStr, err := domain.NewID(domain.PrefixRun)
+	if err != nil {
+		t.Fatal(err)
+	}
+	run, err := domain.NewRun(domain.RunID(idStr), tenantID,
+		domain.ThreadID(tid("thr", "missingthread")), "orphan-key", fixedTime(4))
+	if err != nil {
+		t.Fatal(err)
+	}
+	err = repos.Runs.Create(ctx, run)
+	if ErrKind(err) != domain.ErrKindInvalid {
+		t.Fatalf("unknown-thread creation must be typed invalid, got %v", err)
+	}
+	if code := ErrorCode(err); code != "run_thread_unknown" {
+		t.Fatalf("unknown-thread creation must carry code run_thread_unknown, got %q", code)
+	}
+
+	// A foreign tenant's thread is equally invisible to the creator. The
+	// foreign tenant must exist first: the project and thread seeds are
+	// tenant-owned rows with real foreign keys.
+	seedTenant(ctx, t, repos, otherTenID, "globex")
+	project := seedProject(ctx, t, repos, otherTenID)
+	foreignThread := seedThreadAt(ctx, t, repos, otherTenID, project.ID, "foreign thread", fixedTime(2))
+	idStr, err = domain.NewID(domain.PrefixRun)
+	if err != nil {
+		t.Fatal(err)
+	}
+	crossRun, err := domain.NewRun(domain.RunID(idStr), tenantID, foreignThread.ID, "cross-tenant-key", fixedTime(5))
+	if err != nil {
+		t.Fatal(err)
+	}
+	err = repos.Runs.Create(ctx, crossRun)
+	if ErrKind(err) != domain.ErrKindInvalid || ErrorCode(err) != "run_thread_unknown" {
+		t.Fatalf("cross-tenant thread creation must be the same typed invalid, got kind=%v code=%q",
+			ErrKind(err), ErrorCode(err))
+	}
+}
+
+// testAppendMessageOnUnknownThread pins the uniform not-found both adapters
+// must produce when appending to a thread that does not exist in the
+// message's tenant — the same absence the append's row lock probe exists to
+// detect before any sequence allocation happens.
+func testAppendMessageOnUnknownThread(t *testing.T, repos ports.Repositories) {
+	ctx := context.Background()
+	seedTenant(ctx, t, repos, tenantID, "acme")
+	seedTenant(ctx, t, repos, otherTenID, "globex")
+	project := seedProject(ctx, t, repos, otherTenID)
+	foreignThread := seedThreadAt(ctx, t, repos, otherTenID, project.ID, "foreign thread", fixedTime(2))
+
+	append := func(threadID domain.ThreadID, tenantID domain.TenantID) error {
+		msg := &domain.Message{
+			ID:           domain.MessageID(tid("msg", "orphansuffix000000")),
+			TenantID:     tenantID,
+			ThreadID:     threadID,
+			Role:         domain.RoleUser,
+			DeliveryMode: domain.DeliveryImmediate,
+			Content:      "orphan",
+		}
+		return repos.Threads.AppendMessage(ctx, msg)
+	}
+	if err := append(domain.ThreadID(tid("thr", "missingthread")), tenantID); ErrKind(err) != domain.ErrKindNotFound {
+		t.Fatalf("append on unknown thread must be not-found, got %v", err)
+	}
+	if err := append(foreignThread.ID, tenantID); ErrKind(err) != domain.ErrKindNotFound {
+		t.Fatalf("append on foreign-tenant thread must be uniformly not-found, got %v", err)
+	}
+}
+
 func testTaskStaleWrite(t *testing.T, repos ports.Repositories) {
 	ctx := context.Background()
 	seedTenant(ctx, t, repos, tenantID, "acme")
@@ -552,6 +960,17 @@ func testArtifactRoundTrip(t *testing.T, repos ports.Repositories) {
 // ErrKind tolerates wrapped errors from adapters.
 func ErrKind(err error) domain.ErrorKind {
 	return domain.ErrKindOf(err)
+}
+
+// ErrorCode extracts the stable short code from a *domain.Error anywhere in
+// the wrap chain, so adapters that add context never lose the contract code.
+// Foreign errors carry no code.
+func ErrorCode(err error) string {
+	var dom *domain.Error
+	if errors.As(err, &dom) {
+		return dom.Code
+	}
+	return ""
 }
 
 func try(f func() error) error { return f() }

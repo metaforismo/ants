@@ -62,20 +62,26 @@ func (s RunStatus) Terminal() bool {
 }
 
 type Run struct {
-	ID             RunID        `json:"id"`
-	TenantID       TenantID     `json:"tenant_id"`
-	ThreadID       ThreadID     `json:"thread_id"`
-	SpecID         SpecID       `json:"spec_id,omitempty"`
-	Status         RunStatus    `json:"status"`
-	IdempotencyKey string       `json:"idempotency_key"`
-	Principal      PrincipalID  `json:"principal,omitempty"`
-	TaskIDs        []TaskID     `json:"task_ids"`
-	Report         *RunReport   `json:"report,omitempty"`
-	Version        int64        `json:"version"`
-	CreatedAt      time.Time    `json:"created_at"`
-	UpdatedAt      time.Time    `json:"updated_at"`
-	FinishedAt     *time.Time   `json:"finished_at,omitempty"`
-	Failure        *FailureInfo `json:"failure,omitempty"`
+	ID             RunID     `json:"id"`
+	TenantID       TenantID  `json:"tenant_id"`
+	ThreadID       ThreadID  `json:"thread_id"`
+	SpecID         SpecID    `json:"spec_id,omitempty"`
+	Status         RunStatus `json:"status"`
+	IdempotencyKey string    `json:"idempotency_key"`
+	// Seq is the store-assigned, per-thread monotonic cursor used for stable
+	// run-history pagination. It is allocated once at insert time and never
+	// updated, so it orders runs by true creation order regardless of what
+	// any clock did between insertions; clients pass the last observed Seq
+	// back as `after` to resume a history walk exactly there.
+	Seq        int64        `json:"seq"`
+	Principal  PrincipalID  `json:"principal,omitempty"`
+	TaskIDs    []TaskID     `json:"task_ids"`
+	Report     *RunReport   `json:"report,omitempty"`
+	Version    int64        `json:"version"`
+	CreatedAt  time.Time    `json:"created_at"`
+	UpdatedAt  time.Time    `json:"updated_at"`
+	FinishedAt *time.Time   `json:"finished_at,omitempty"`
+	Failure    *FailureInfo `json:"failure,omitempty"`
 }
 
 const MaxIdempotencyKeyLen = 256

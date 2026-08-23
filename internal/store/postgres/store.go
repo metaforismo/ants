@@ -186,6 +186,18 @@ func mapUniqueViolation(err error, code string, format string, args ...any) erro
 	return err
 }
 
+// mapConstraintViolation converts one named unique-constraint violation into
+// a typed conflict. Tables with more than one unique constraint must use this
+// instead of mapUniqueViolation: a bare 23505 match would let a breach of one
+// constraint masquerade as the expected conflict of another.
+func mapConstraintViolation(err error, constraint, code, format string, args ...any) error {
+	var pgErr *pgconn.PgError
+	if errors.As(err, &pgErr) && pgErr.Code == "23505" && pgErr.ConstraintName == constraint {
+		return domain.Conflictf(code, format, args...)
+	}
+	return err
+}
+
 func marshalJSONColumn(v any) ([]byte, error) {
 	b, err := json.Marshal(v)
 	if err != nil {

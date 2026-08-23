@@ -158,7 +158,26 @@ export interface paths {
             path?: never;
             cookie?: never;
         };
-        get?: never;
+        /**
+         * List the runs of a thread
+         * @description Runs are returned oldest first in creation order, keyed by the
+         *     store-assigned per-thread `seq`: the sequence is allocated exactly
+         *     once when the run is created and never changes, so it is immutable
+         *     and append-stable by construction — independent of what any clock
+         *     did between insertions. Pages are keyset-paginated: pass the last
+         *     observed run's `seq` back as `after`, and pages fetched with
+         *     increasing cursors never duplicate or skip, even when concurrent
+         *     starts grow `total` between page requests or a clock rollback makes
+         *     a later-created row carry an earlier created_at. The newest run is
+         *     therefore the last item of the final page, not of the first one —
+         *     clients wanting the true latest must walk pages until they have
+         *     consumed `total` entries (the console does exactly this; it must not
+         *     assume any single bounded page holds the latest run). A known thread
+         *     without runs yields an empty `runs` array, never an error; an unknown
+         *     or foreign-tenant thread yields the uniform 404 problem (no existence
+         *     oracle, ADR-0004).
+         */
+        get: operations["listThreadRuns"];
         put?: never;
         /**
          * Start a run for the thread. Requires an `Idempotency-Key`;
@@ -433,6 +452,13 @@ export interface components {
             spec_id?: components["schemas"]["SpecID"];
             status: components["schemas"]["RunStatus"];
             idempotency_key: string;
+            /**
+             * Format: int64
+             * @description Store-assigned per-thread sequence number, strictly increasing in
+             *     creation order and immutable afterwards. Pass the last run's seq
+             *     back as `after` to continue walking the history exactly there.
+             */
+            seq: number;
             task_ids: components["schemas"]["TaskID"][];
             report?: components["schemas"]["RunReport"];
             failure?: components["schemas"]["FailureInfo"];
@@ -445,6 +471,15 @@ export interface components {
         RunWithTasks: {
             run: components["schemas"]["Run"];
             tasks: components["schemas"]["Task"][];
+        };
+        /** @description One keyset page of a thread's run history in creation order */
+        RunPage: {
+            runs: components["schemas"]["Run"][];
+            /**
+             * Format: int64
+             * @description Total number of runs recorded for the thread
+             */
+            total: number;
         };
         Actor: {
             /** @enum {string} */
@@ -569,7 +604,19 @@ export interface components {
         RunID: components["schemas"]["RunID"];
         TaskID: components["schemas"]["TaskID"];
         ArtifactID: components["schemas"]["ArtifactID"];
-        /** @description Return entries with cursor strictly greater than this value */
+        /**
+         * @description Return entries whose sequence number is strictly greater than this
+         *     value in the listing's stable ascending order. Which sequence the
+         *     value belongs to is fixed per listing: thread runs use the
+         *     per-thread run sequence assigned by the store at creation time,
+         *     thread messages use the per-thread message sequence, and run events
+         *     use the tenant's event sequence. The grammar is exactly this schema
+         *     (integer, minimum 0, default 0): omitted means 0; a present value
+         *     must be a single decimal-digit integer (no sign, whitespace, or
+         *     other padding) within the int64 range. Repeated, empty, or malformed
+         *     values are rejected with problem code `invalid_cursor` rather than
+         *     silently falling back to the default.
+         */
         AfterCursor: number;
     };
     requestBodies: never;
@@ -790,7 +837,19 @@ export interface operations {
     listThreadMessages: {
         parameters: {
             query?: {
-                /** @description Return entries with cursor strictly greater than this value */
+                /**
+                 * @description Return entries whose sequence number is strictly greater than this
+                 *     value in the listing's stable ascending order. Which sequence the
+                 *     value belongs to is fixed per listing: thread runs use the
+                 *     per-thread run sequence assigned by the store at creation time,
+                 *     thread messages use the per-thread message sequence, and run events
+                 *     use the tenant's event sequence. The grammar is exactly this schema
+                 *     (integer, minimum 0, default 0): omitted means 0; a present value
+                 *     must be a single decimal-digit integer (no sign, whitespace, or
+                 *     other padding) within the int64 range. Repeated, empty, or malformed
+                 *     values are rejected with problem code `invalid_cursor` rather than
+                 *     silently falling back to the default.
+                 */
                 after?: components["parameters"]["AfterCursor"];
             };
             header?: never;
@@ -839,6 +898,45 @@ export interface operations {
                 };
             };
             400: components["responses"]["Problem"];
+            401: components["responses"]["Problem"];
+            404: components["responses"]["Problem"];
+        };
+    };
+    listThreadRuns: {
+        parameters: {
+            query?: {
+                /**
+                 * @description Return entries whose sequence number is strictly greater than this
+                 *     value in the listing's stable ascending order. Which sequence the
+                 *     value belongs to is fixed per listing: thread runs use the
+                 *     per-thread run sequence assigned by the store at creation time,
+                 *     thread messages use the per-thread message sequence, and run events
+                 *     use the tenant's event sequence. The grammar is exactly this schema
+                 *     (integer, minimum 0, default 0): omitted means 0; a present value
+                 *     must be a single decimal-digit integer (no sign, whitespace, or
+                 *     other padding) within the int64 range. Repeated, empty, or malformed
+                 *     values are rejected with problem code `invalid_cursor` rather than
+                 *     silently falling back to the default.
+                 */
+                after?: components["parameters"]["AfterCursor"];
+            };
+            header?: never;
+            path: {
+                id: components["parameters"]["ThreadID"];
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description One bounded page of the thread's runs with the total count */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["RunPage"];
+                };
+            };
             401: components["responses"]["Problem"];
             404: components["responses"]["Problem"];
         };
@@ -897,7 +995,19 @@ export interface operations {
     listRunEvents: {
         parameters: {
             query?: {
-                /** @description Return entries with cursor strictly greater than this value */
+                /**
+                 * @description Return entries whose sequence number is strictly greater than this
+                 *     value in the listing's stable ascending order. Which sequence the
+                 *     value belongs to is fixed per listing: thread runs use the
+                 *     per-thread run sequence assigned by the store at creation time,
+                 *     thread messages use the per-thread message sequence, and run events
+                 *     use the tenant's event sequence. The grammar is exactly this schema
+                 *     (integer, minimum 0, default 0): omitted means 0; a present value
+                 *     must be a single decimal-digit integer (no sign, whitespace, or
+                 *     other padding) within the int64 range. Repeated, empty, or malformed
+                 *     values are rejected with problem code `invalid_cursor` rather than
+                 *     silently falling back to the default.
+                 */
                 after?: components["parameters"]["AfterCursor"];
             };
             header?: never;

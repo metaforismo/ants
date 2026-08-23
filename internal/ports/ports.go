@@ -73,6 +73,23 @@ type RunStore interface {
 	Get(ctx context.Context, tenantID domain.TenantID, id domain.RunID) (*domain.Run, error)
 	Update(ctx context.Context, run *domain.Run, expectedVersion int64) error
 	GetByIdempotencyKey(ctx context.Context, tenantID domain.TenantID, threadID domain.ThreadID, key string) (*domain.Run, error)
+	// ListByThread returns one page of the thread's run history, oldest
+	// first in the store-assigned per-thread sequence order (true creation
+	// order). `after` is a keyset cursor: a sequence value, and only runs
+	// whose sequence is strictly greater are returned. The store allocates
+	// each run's sequence exactly once, at insert time, strictly increasing
+	// per thread; it is immutable afterwards and independent of clock
+	// behavior, so a run created between two page requests — even one whose
+	// created_at is backdated by a clock rollback — can never land inside
+	// already-consumed history: a reader walking increasing cursors sees
+	// every run exactly once even when concurrent starts grow the total
+	// between page requests. The newest run is therefore the last item of
+	// the final page, not of the first one; consumers wanting it must
+	// traverse to the end.
+	// limit <= 0 means no limit. A known thread with no runs yields an
+	// empty slice; an unknown or foreign-tenant thread yields uniform
+	// not-found (ADR-0004), never a distinguishable absence.
+	ListByThread(ctx context.Context, tenantID domain.TenantID, threadID domain.ThreadID, after int64, limit int) ([]*domain.Run, int64, error)
 }
 
 type WorkspaceStore interface {

@@ -113,13 +113,17 @@ func (r *ThreadRepository) Update(ctx context.Context, thread *domain.Thread, ex
 // (thread_id, seq).
 func (r *ThreadRepository) AppendMessage(ctx context.Context, message *domain.Message) error {
 	return withinAutoTx(ctx, r.st, func(ctx context.Context) error {
-		if _, err := r.st.q(ctx).ExecContext(ctx,
+		// Row-fetching probe on purpose: ExecContext never surfaces
+		// sql.ErrNoRows, so an Exec-based lock probe cannot detect the
+		// absent-thread case it exists to reject.
+		var one int
+		if err := r.st.q(ctx).QueryRowContext(ctx,
 			`SELECT 1 FROM threads WHERE id = $1 AND tenant_id = $2 FOR UPDATE`,
-			string(message.ThreadID), string(message.TenantID)); err != nil {
+			string(message.ThreadID), string(message.TenantID)).Scan(&one); err != nil {
 			if errors.Is(err, sql.ErrNoRows) {
 				return domain.NotFoundf("thread", message.ThreadID)
 			}
-			return wrapWrite(err)
+			return wrapScan(err)
 		}
 		var nextSeq int64
 		err := r.st.q(ctx).QueryRowContext(ctx,

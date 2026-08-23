@@ -100,6 +100,7 @@ func NewReposWithOptions(opts Options) (*Repos, error) {
 		tasks:             map[domain.TaskID]*domain.Task{},
 		runs:              map[domain.RunID]*domain.Run{},
 		runIdemKeys:       map[idemKey]domain.RunID{},
+		runSeqs:           map[domain.ThreadID]int64{},
 		workspaces:        map[domain.WorkspaceID]*domain.Workspace{},
 		artifacts:         map[domain.ArtifactID]*domain.Artifact{},
 		policyByRun:       map[domain.RunID][]*domain.PolicyDecision{},
@@ -144,15 +145,19 @@ type storeState struct {
 	// when events are persisted (ADR-0011).
 	outboxMaxAttempts int
 
-	tenants       map[domain.TenantID]*domain.Tenant
-	tenantSlugs   map[string]domain.TenantID
-	projects      map[domain.ProjectID]*domain.Project
-	threads       map[domain.ThreadID]*domain.Thread
-	messages      map[domain.ThreadID][]*domain.Message
-	specs         map[domain.SpecID]*domain.Spec
-	tasks         map[domain.TaskID]*domain.Task
-	runs          map[domain.RunID]*domain.Run
-	runIdemKeys   map[idemKey]domain.RunID
+	tenants     map[domain.TenantID]*domain.Tenant
+	tenantSlugs map[string]domain.TenantID
+	projects    map[domain.ProjectID]*domain.Project
+	threads     map[domain.ThreadID]*domain.Thread
+	messages    map[domain.ThreadID][]*domain.Message
+	specs       map[domain.SpecID]*domain.Spec
+	tasks       map[domain.TaskID]*domain.Task
+	runs        map[domain.RunID]*domain.Run
+	runIdemKeys map[idemKey]domain.RunID
+	// runSeqs holds one monotonic counter per thread, allocated under the
+	// write lock so run-history ordering keys are append-stable by
+	// construction and independent of any clock behavior.
+	runSeqs       map[domain.ThreadID]int64
 	workspaces    map[domain.WorkspaceID]*domain.Workspace
 	artifacts     map[domain.ArtifactID]*domain.Artifact
 	auditLog      []*domain.AuditEvent

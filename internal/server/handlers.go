@@ -235,12 +235,51 @@ func (s *Server) handleListMessages(w http.ResponseWriter, r *http.Request) {
 		writeProblem(w, r, asDomainError(err))
 		return
 	}
-	messages, total, listErr := s.repos.Threads.Messages(r.Context(), p.TenantID, threadID, queryInt64(r, "after"), defaultPageLimit)
+	after, cerr := parseAfterCursor(r)
+	if cerr != nil {
+		writeProblem(w, r, cerr)
+		return
+	}
+	messages, total, listErr := s.repos.Threads.Messages(r.Context(), p.TenantID, threadID, after, defaultPageLimit)
 	if listErr != nil {
 		writeProblem(w, r, asDomainError(listErr))
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"messages": messages, "total": total})
+}
+
+// handleListThreadRuns serves one keyset page of the thread's run history in
+// the store-assigned per-thread sequence order (true creation order): only
+// runs whose sequence is strictly greater than `after` are returned. The
+// sequence is allocated once at insert time and never changes, so pages
+// fetched with increasing cursors never duplicate or skip regardless of
+// clock behavior; clients that need the true latest run walk pages up to the
+// authoritative `total`, passing the last observed run's seq back as `after`
+// (see the console's listAllThreadRuns) instead of relying on any single
+// bounded page. The store distinguishes an unknown or foreign-tenant thread
+// (uniform 404, ADR-0004) from a known thread whose page is simply empty, so
+// no existence oracle leaks here.
+func (s *Server) handleListThreadRuns(w http.ResponseWriter, r *http.Request) {
+	p := mustPrincipal(w, r)
+	if p == nil {
+		return
+	}
+	threadID, err := domain.ParseThreadID(r.PathValue("id"))
+	if err != nil {
+		writeProblem(w, r, asDomainError(err))
+		return
+	}
+	after, cerr := parseAfterCursor(r)
+	if cerr != nil {
+		writeProblem(w, r, cerr)
+		return
+	}
+	runs, total, listErr := s.repos.Runs.ListByThread(r.Context(), p.TenantID, threadID, after, defaultPageLimit)
+	if listErr != nil {
+		writeProblem(w, r, asDomainError(listErr))
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"runs": runs, "total": total})
 }
 
 // ---- runs ----
@@ -320,7 +359,12 @@ func (s *Server) handleRunEvents(w http.ResponseWriter, r *http.Request) {
 		writeProblem(w, r, asDomainError(getErr))
 		return
 	}
-	events, listErr := s.repos.Events.ListByRun(r.Context(), p.TenantID, runID, queryInt64(r, "after"), defaultPageLimit)
+	after, cerr := parseAfterCursor(r)
+	if cerr != nil {
+		writeProblem(w, r, cerr)
+		return
+	}
+	events, listErr := s.repos.Events.ListByRun(r.Context(), p.TenantID, runID, after, defaultPageLimit)
 	if listErr != nil {
 		writeProblem(w, r, asDomainError(listErr))
 		return
@@ -420,16 +464,47 @@ func (s *Server) handleGetArtifact(w http.ResponseWriter, r *http.Request) {
 
 const defaultPageLimit = 200
 
-func queryInt64(r *http.Request, name string) int64 {
-	raw := r.URL.Query().Get(name)
-	if raw == "" {
-		return 0
+// parseAfterCursor parses the shared `after` list cursor. The grammar is
+// exactly the OpenAPI schema (integer, minimum 0, default 0): an omitted
+// cursor means 0, and a present cursor must be a single value of decimal
+// digits only. Anything else — repeated parameters, explicit empties,
+// signs, whitespace or other padding, non-digits, values beyond int64 — is
+// a typed invalid_cursor problem rather than a silent fallback to the
+// default, so a client bug can never masquerade as "page from the start".
+// Leading zeros are accepted: the numeric value, not its notation,
+// identifies the cursor.
+func parseAfterCursor(r *http.Request) (int64, *domain.Error) {
+	values := r.URL.Query()["after"]
+	switch len(values) {
+	case 0:
+		return 0, nil
+	case 1:
+		// Fall through to value validation below.
+	default:
+		return 0, domain.Invalidf("invalid_cursor", "the after cursor must be given at most once")
+	}
+	raw := values[0]
+	if raw == "" || !isASCIIDigits(raw) {
+		return 0, domain.Invalidf("invalid_cursor", "the after cursor must be a non-negative integer")
 	}
 	v, err := strconv.ParseInt(raw, 10, 64)
-	if err != nil || v < 0 {
-		return 0
+	if err != nil {
+		// Digits-only input can only overflow int64 here.
+		return 0, domain.Invalidf("invalid_cursor", "the after cursor exceeds the supported range")
 	}
-	return v
+	return v, nil
+}
+
+// isASCIIDigits reports whether s is one or more ASCII digits — no sign,
+// no whitespace, no padding characters — the canonical wire form of a
+// non-negative integer.
+func isASCIIDigits(s string) bool {
+	for i := 0; i < len(s); i++ {
+		if s[i] < '0' || s[i] > '9' {
+			return false
+		}
+	}
+	return len(s) > 0
 }
 
 // emitTenantEvent appends the tenant-created event; its durable outbox

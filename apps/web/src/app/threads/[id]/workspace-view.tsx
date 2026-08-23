@@ -8,8 +8,8 @@ import { MessageList } from "@/app/threads/[id]/message-list";
 import { RunPanel } from "@/app/threads/[id]/run-panel";
 import { ExpiredNotice, humanStatus } from "@/app/threads/threads-view";
 import { StatusBadge } from "@/components/status-badge";
-import { useActiveRun } from "@/hooks/use-active-run";
-import { api, errorCode } from "@/lib/client-api";
+import { api, errorCode, listAllThreadRuns } from "@/lib/client-api";
+import { isTerminalRun, latestRun } from "@/lib/runs";
 import { threadKind } from "@/lib/status";
 
 const THREAD_LIVE = new Set(["planning", "executing", "reviewing", "fixing"]);
@@ -17,10 +17,17 @@ const THREAD_LIVE = new Set(["planning", "executing", "reviewing", "fixing"]);
 /**
  * Thread workspace: the one screen where the conversation, its runs, the
  * live event trail, and the terminal report are legible together.
+ *
+ * Which run to show is decided from server truth alone: the run-history
+ * helper walks every keyset page through the authoritative total, so the
+ * history ends with the true latest run and reopening a thread here
+ * reattaches to its live/latest run in any tab, on any device — even when
+ * the history outgrows one server page. One React Query key owns the whole
+ * traversal, so polling re-runs it as a single sequential request chain
+ * with no duplicate concurrent calls.
  */
 export function WorkspaceView({ threadId }: { threadId: string }) {
   const queryClient = useQueryClient();
-  const { runId, setActiveRun } = useActiveRun(threadId);
 
   const threadQuery = useQuery({
     queryKey: ["thread", threadId],
@@ -32,6 +39,18 @@ export function WorkspaceView({ threadId }: { threadId: string }) {
     queryKey: ["messages", threadId],
     queryFn: () => api.listMessages(threadId, 0),
     refetchInterval: THREAD_LIVE.has(threadQuery.data?.status ?? "") ? 3000 : false,
+  });
+
+  const runsQuery = useQuery({
+    queryKey: ["thread-runs", threadId],
+    queryFn: () => listAllThreadRuns(threadId),
+    // Keep discovering while the thread moves or its newest run is live;
+    // once both settle there is nothing new to find.
+    refetchInterval: ({ state }) => {
+      const threadLive = THREAD_LIVE.has(threadQuery.data?.status ?? "");
+      const newest = latestRun(state.data?.runs ?? []);
+      return !threadLive && (!newest || isTerminalRun(newest)) ? false : 5000;
+    },
   });
 
   const appendMessage = useMutation({
@@ -64,6 +83,62 @@ export function WorkspaceView({ threadId }: { threadId: string }) {
   const messages = messagesQuery.data?.messages ?? [];
   const threadLive = THREAD_LIVE.has(thread.status);
 
+  let runSection: React.ReactNode;
+  if (runsQuery.isPending) {
+    runSection = (
+      <section aria-label="Run history" className="card" style={{ padding: 16 }} data-testid="runs-loading">
+        <div aria-hidden="true">
+          <div className="skeleton-row" />
+        </div>
+      </section>
+    );
+  } else if (runsQuery.isError) {
+    runSection =
+      errorCode(runsQuery.error) === "session_expired" ? (
+        <ExpiredNotice />
+      ) : (
+        <section role="alert" className="card state-panel" data-testid="runs-error">
+          <p className="state-title">Could not load this thread's runs</p>
+          <button type="button" className="btn" onClick={() => runsQuery.refetch()}>
+            Retry
+          </button>
+        </section>
+      );
+  } else {
+    const newest = latestRun(runsQuery.data?.runs ?? []);
+    runSection = newest ? (
+      <RunPanel runId={newest.id} />
+    ) : (
+      <section aria-label="Start a run" className="card" style={{ padding: 16 }}>
+        <div
+          style={{
+            display: "flex",
+            alignItems: "center",
+            justifyContent: "space-between",
+            gap: 12,
+            flexWrap: "wrap",
+          }}
+        >
+          <p style={{ margin: 0, color: "var(--ink-2)" }}>
+            {messages.length === 0
+              ? "Describe the outcome below; then start a run to delegate it."
+              : "No runs yet. The described outcome is ready to be delegated."}
+          </p>
+          {!threadLive ? (
+            <StartRunButton
+              threadId={threadId}
+              hasMessages={messages.length > 0}
+              onStarted={() => {
+                void queryClient.invalidateQueries({ queryKey: ["thread-runs", threadId] });
+                void queryClient.invalidateQueries({ queryKey: ["thread", threadId] });
+              }}
+            />
+          ) : null}
+        </div>
+      </section>
+    );
+  }
+
   return (
     <div style={{ display: "grid", gap: 20 }}>
       <header className="page-head" style={{ marginBottom: 0 }}>
@@ -76,32 +151,7 @@ export function WorkspaceView({ threadId }: { threadId: string }) {
         <StatusBadge label={humanStatus(thread.status)} kind={threadKind(thread.status)} />
       </header>
 
-      {runId ? (
-        <RunPanel runId={runId} />
-      ) : (
-        <section aria-label="Start a run" className="card" style={{ padding: 16 }}>
-          <div
-            style={{
-              display: "flex",
-              alignItems: "center",
-              justifyContent: "space-between",
-              gap: 12,
-              flexWrap: "wrap",
-            }}
-          >
-            <p style={{ margin: 0, color: "var(--ink-2)" }}>
-              {messages.length === 0
-                ? "Describe the outcome below; then start a run to delegate it."
-                : threadLive
-                  ? "A run is executing for this thread in another view. Its panel reattaches here once this tab has seen it."
-                  : "The described outcome is ready to be delegated to a run."}
-            </p>
-            {!threadLive ? (
-              <StartRunButton threadId={threadId} hasMessages={messages.length > 0} onStarted={setActiveRun} />
-            ) : null}
-          </div>
-        </section>
-      )}
+      {runSection}
 
       <section aria-label="Conversation" style={{ display: "grid", gap: 12 }}>
         <h2>Conversation</h2>
@@ -166,9 +216,8 @@ function StartRunButton({
 }: {
   threadId: string;
   hasMessages: boolean;
-  onStarted: (runId: string) => void;
+  onStarted: () => void;
 }) {
-  const queryClient = useQueryClient();
   // The idempotency key identifies one logical intent ("start THE run for
   // this attempt"): retries of an ambiguous request replay the same run
   // instead of double-starting. A new intent after success gets a new key.
@@ -179,10 +228,9 @@ function StartRunButton({
     setStarting(true);
     try {
       keyRef.current ??= crypto.randomUUID();
-      const run = await api.startRun(threadId, keyRef.current);
+      await api.startRun(threadId, keyRef.current);
       keyRef.current = undefined;
-      onStarted(run.id);
-      await queryClient.invalidateQueries({ queryKey: ["thread", threadId] });
+      onStarted();
     } catch {
       // The refused intent stays retryable with a fresh key; typed problem
       // rendering is owned by the surrounding surfaces.

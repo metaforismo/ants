@@ -23,8 +23,15 @@ func (r *RunRepository) Create(_ context.Context, run *domain.Run) error {
 	if _, exists := r.st.runs[run.ID]; exists {
 		return domain.Conflictf("run_exists", "run %s already exists", run.ID)
 	}
+	// The per-thread sequence is allocated under the same write lock as the
+	// insert, so it is dense and strictly increasing in insertion order —
+	// the append-stable key run-history pagination orders by.
+	stored := cloneRun(run)
+	r.st.runSeqs[run.ThreadID]++
+	run.Seq = r.st.runSeqs[run.ThreadID]
+	stored.Seq = run.Seq
 	r.st.runIdemKeys[key] = run.ID
-	r.st.runs[run.ID] = cloneRun(run)
+	r.st.runs[run.ID] = stored
 	return nil
 }
 
@@ -67,6 +74,39 @@ func (r *RunRepository) GetByIdempotencyKey(_ context.Context, tenantID domain.T
 		return nil, notFound("run", id)
 	}
 	return cloneRun(run), nil
+}
+
+// ListByThread serves one keyset page of the thread's run history, oldest
+// first in the store-assigned per-thread sequence order (true creation
+// order). `after` is a sequence value: only runs whose Seq is strictly
+// greater are returned. Because sequences are allocated once at insert time
+// and never change, concurrent or backdated creations can never reorder
+// entries a reader has already consumed.
+func (r *RunRepository) ListByThread(_ context.Context, tenantID domain.TenantID, threadID domain.ThreadID, after int64, limit int) ([]*domain.Run, int64, error) {
+	unlock := lockRead(r.st)
+	defer unlock()
+	t, ok := r.st.threads[threadID]
+	if !ok || t.TenantID != tenantID {
+		return nil, 0, notFound("thread", threadID)
+	}
+	owned := make([]*domain.Run, 0, len(r.st.runs))
+	for _, run := range r.st.runs {
+		if run.ThreadID == threadID && run.TenantID == tenantID {
+			owned = append(owned, run)
+		}
+	}
+	total := int64(len(owned))
+	sort.Slice(owned, func(i, j int) bool { return owned[i].Seq < owned[j].Seq })
+	out := make([]*domain.Run, 0, len(owned))
+	for _, run := range owned {
+		if limit > 0 && len(out) >= limit {
+			break
+		}
+		if run.Seq > after {
+			out = append(out, cloneRun(run))
+		}
+	}
+	return out, total, nil
 }
 
 type TaskRepository struct{ st *storeState }

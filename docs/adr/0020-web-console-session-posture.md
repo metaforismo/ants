@@ -139,6 +139,42 @@ open `POST /v1/tenants` endpoint (probing `unknown_tenant` first;
 concurrent-create races treated as success). This is a named limitation of
 the current membership model, not a property of the session design.
 
+Update (2026-08-23, PR 3.8): the console's run anchoring moved fully onto
+server truth. The workspace consumes `GET /v1/threads/{id}/runs` through the
+BFF and reattaches to the thread's live/latest run in any tab, replacing the
+original per-tab `sessionStorage` anchor that PR 3.7 shipped as an interim
+limitation. Nothing about the session posture changes: the new read is one
+more bearer-token call through the same proxy, and cross-tenant misses still
+render as uniform not-available copy (ADR-0004).
+
+Update (2026-08-23, adversarial pagination audit): reattachment no longer
+assumes any single bounded page holds the newest run. The workspace issues
+one React Query traversal (`listAllThreadRuns`) that walks positional
+oldest-first pages until the authoritative `total` is consumed, so the true
+latest run is the final item however long the history grows; concurrent
+tail appends during a walk extend it within bounded guards rather than
+racing a waterfall of ad-hoc requests. The list contract stays
+newest-last-on-purpose: positional offsets are stable precisely because new
+runs append only at the tail, which is why a newest-first + OFFSET shape
+was rejected.
+
+Update (2026-08-23, release-audit keyset migration): the previous update's
+stability argument was false and is superseded. Positional offsets over
+(created_at, id) are NOT guaranteed tail-append-stable: created_at comes
+from the service clock, and a clock rollback (NTP step correction, VM
+snapshot restore) lets a later-created run sort before an already-consumed
+offset, silently duplicating and omitting history entries and reattaching
+the console to a stale latest run. Run-history listing is therefore
+keyset-paginated over a store-assigned per-thread `seq`, allocated exactly
+once at insert time under the same serialization discipline as thread
+messages: the ordering key is immutable and append-stable by construction,
+independent of clock behavior. Clients pass the last observed run's `seq`
+back as `after`; the response shape (`{runs, total}`) and the strict cursor
+grammar are unchanged, while the shared `after` parameter now means "sequence
+value strictly greater" uniformly across runs, messages, and events.
+Migration 0009 backfills sequences in the historical (created_at, id) order,
+preserving every position previously observed.
+
 ## Non-goals
 
 - Memberships, roles, invitations, RBAC — the authorization model remains

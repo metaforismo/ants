@@ -11,17 +11,22 @@ import (
 
 type RunRepository struct{ st *Store }
 
+// runScanner is satisfied by both *sql.Row and *sql.Rows, so one column
+// mapping serves single-row reads and list scans alike.
+type runScanner interface{ Scan(dest ...any) error }
+
 var _ interface {
 	Create(context.Context, *domain.Run) error
 	Get(context.Context, domain.TenantID, domain.RunID) (*domain.Run, error)
 	Update(context.Context, *domain.Run, int64) error
 	GetByIdempotencyKey(context.Context, domain.TenantID, domain.ThreadID, string) (*domain.Run, error)
+	ListByThread(context.Context, domain.TenantID, domain.ThreadID, int64, int) ([]*domain.Run, int64, error)
 } = (*RunRepository)(nil)
 
-const runColumns = `id, tenant_id, thread_id, spec_id, status, idempotency_key,
+const runColumns = `id, tenant_id, thread_id, spec_id, status, idempotency_key, seq,
 	task_ids, report, principal, failure, version, created_at, updated_at, finished_at`
 
-func scanRun(row *sql.Row) (*domain.Run, error) {
+func scanRun(row runScanner) (*domain.Run, error) {
 	var (
 		r               domain.Run
 		specID          sql.NullString
@@ -31,7 +36,7 @@ func scanRun(row *sql.Row) (*domain.Run, error) {
 		finishedAt      sql.NullTime
 	)
 	err := row.Scan(&r.ID, &r.TenantID, &r.ThreadID, &specID, &r.Status,
-		&r.IdempotencyKey, &taskIDs, &report, &principal, &failure,
+		&r.IdempotencyKey, &r.Seq, &taskIDs, &report, &principal, &failure,
 		&r.Version, &r.CreatedAt, &r.UpdatedAt, &finishedAt)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, domain.NotFoundf("run", "row")
@@ -89,14 +94,19 @@ func (s *Store) insertRun(ctx context.Context, run *domain.Run) error {
 		failure = b
 	}
 	_, werr := s.q(ctx).ExecContext(ctx,
-		`INSERT INTO runs (id, tenant_id, thread_id, spec_id, status, idempotency_key,
+		`INSERT INTO runs (id, tenant_id, thread_id, spec_id, status, idempotency_key, seq,
 		   task_ids, report, principal, failure, version, created_at, updated_at, finished_at)
-		 VALUES ($1,$2,$3,NULLIF($4,'')::text,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14)`,
+		 VALUES ($1,$2,$3,NULLIF($4,'')::text,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15)`,
 		string(run.ID), string(run.TenantID), string(run.ThreadID), string(run.SpecID),
-		string(run.Status), run.IdempotencyKey, taskIDs, report,
+		string(run.Status), run.IdempotencyKey, run.Seq, taskIDs, report,
 		string(run.Principal), failure, run.Version, run.CreatedAt, run.UpdatedAt, nullTime(run.FinishedAt))
 	if werr != nil {
-		if mapped := mapUniqueViolation(werr, "run_idempotency_key_taken",
+		// Constraint-specific on purpose: the runs table now carries a second
+		// unique index (the per-thread sequence), and an unnamed-code match
+		// would misreport a sequence-collision integrity breach as the
+		// routine idempotency replay conflict.
+		if mapped := mapConstraintViolation(werr, "runs_tenant_id_thread_id_idempotency_key_key",
+			"run_idempotency_key_taken",
 			"idempotency key already used for this thread"); mapped != werr {
 			return mapped
 		}
@@ -113,7 +123,34 @@ func (r *RunRepository) Create(ctx context.Context, run *domain.Run) error {
 	} else if domain.ErrKindOf(err) != domain.ErrKindNotFound {
 		return err
 	}
-	return r.st.insertRun(ctx, run)
+	// The per-thread sequence is allocated inside the unit of work while the
+	// parent thread row is locked, so concurrent creators serialize and
+	// MAX(seq)+1 can never collide — the same discipline as AppendMessage.
+	// Joining an outer transaction keeps engine paths (run + claim) atomic.
+	return withinAutoTx(ctx, r.st, func(ctx context.Context) error {
+		// The lock probe must be a row-fetching query: ExecContext never
+		// surfaces sql.ErrNoRows, so an Exec-based probe cannot detect the
+		// absent-thread case it exists to reject.
+		var one int
+		err := r.st.q(ctx).QueryRowContext(ctx,
+			`SELECT 1 FROM threads WHERE id = $1 AND tenant_id = $2 FOR UPDATE`,
+			string(run.ThreadID), string(run.TenantID)).Scan(&one)
+		if err != nil {
+			if errors.Is(err, sql.ErrNoRows) {
+				return domain.Invalidf("run_thread_unknown", "run references unknown thread %s", run.ThreadID)
+			}
+			return wrapScan(err)
+		}
+		var nextSeq int64
+		err = r.st.q(ctx).QueryRowContext(ctx,
+			`SELECT COALESCE(MAX(seq), 0) + 1 FROM runs WHERE tenant_id = $1 AND thread_id = $2`,
+			string(run.TenantID), string(run.ThreadID)).Scan(&nextSeq)
+		if err != nil {
+			return wrapScan(err)
+		}
+		run.Seq = nextSeq
+		return r.st.insertRun(ctx, run)
+	})
 }
 
 func (r *RunRepository) Get(ctx context.Context, tenantID domain.TenantID, id domain.RunID) (*domain.Run, error) {
@@ -172,6 +209,79 @@ func (r *RunRepository) GetByIdempotencyKey(ctx context.Context, tenantID domain
 		`SELECT `+runColumns+` FROM runs
 		 WHERE tenant_id = $1 AND thread_id = $2 AND idempotency_key = $3`,
 		string(tenantID), string(threadID), key))
+}
+
+// ListByThread serves one keyset page in the store-assigned per-thread
+// sequence order (true creation order): rows whose seq is strictly greater
+// than the cursor, ascending.
+//
+// Snapshot boundary, stated precisely: COUNT and SELECT are separate
+// statements and do NOT form one atomic snapshot. That is safe here because
+// the ordering key is allocated once at insert time under the parent thread
+// row lock and never changes: a run created concurrently — whatever its
+// created_at says — receives a strictly greater seq than every row this
+// thread already had, so it can only extend the tail the reader has not
+// consumed yet. Pages fetched with increasing seq cursors therefore never
+// duplicate or skip; the total a caller observed earlier may simply be
+// stale-low. No multi-request snapshot consistency is claimed or required
+// (the console traversal re-reads the authoritative total on every page).
+func (r *RunRepository) ListByThread(ctx context.Context, tenantID domain.TenantID, threadID domain.ThreadID, after int64, limit int) ([]*domain.Run, int64, error) {
+	var total int64
+	err := r.st.q(ctx).QueryRowContext(ctx,
+		`SELECT COUNT(*) FROM runs WHERE tenant_id = $1 AND thread_id = $2`,
+		string(tenantID), string(threadID)).Scan(&total)
+	if err != nil {
+		return nil, 0, wrapScan(err)
+	}
+	if total == 0 {
+		// Distinguish unknown or foreign thread from a known-but-empty one.
+		if terr := r.checkThreadVisible(ctx, tenantID, threadID); terr != nil {
+			return nil, 0, terr
+		}
+		return []*domain.Run{}, 0, nil
+	}
+	query := `SELECT ` + runColumns + ` FROM runs
+	          WHERE tenant_id = $1 AND thread_id = $2 AND seq > $3
+	          ORDER BY seq ASC`
+	args := []any{string(tenantID), string(threadID), max(after, 0)}
+	if limit > 0 {
+		query += ` LIMIT $4`
+		args = append(args, limit)
+	}
+	rows, err := r.st.q(ctx).QueryContext(ctx, query, args...)
+	if err != nil {
+		return nil, 0, wrapScan(err)
+	}
+	defer rows.Close()
+	out := []*domain.Run{}
+	for rows.Next() {
+		run, scanErr := scanRun(rows)
+		if scanErr != nil {
+			return nil, 0, scanErr
+		}
+		out = append(out, run)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, 0, wrapScan(err)
+	}
+	return out, total, nil
+}
+
+// checkThreadVisible resolves the uniform not-found for a list against an
+// unknown or foreign-tenant thread; known threads answer with their
+// (possibly empty) page.
+func (r *RunRepository) checkThreadVisible(ctx context.Context, tenantID domain.TenantID, threadID domain.ThreadID) error {
+	var ok bool
+	err := r.st.q(ctx).QueryRowContext(ctx,
+		`SELECT EXISTS (SELECT 1 FROM threads WHERE id = $1 AND tenant_id = $2)`,
+		string(threadID), string(tenantID)).Scan(&ok)
+	if err != nil {
+		return wrapScan(err)
+	}
+	if !ok {
+		return domain.NotFoundf("thread", threadID)
+	}
+	return nil
 }
 
 func nonNilTaskIDs(in []domain.TaskID) []domain.TaskID {

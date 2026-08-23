@@ -4,12 +4,14 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/metaforismo/ants/internal/config"
 	"github.com/metaforismo/ants/internal/domain"
@@ -290,12 +292,13 @@ func TestCrossTenantIsolation(t *testing.T) {
 
 	// Tenant B must not see any A resource: uniform 404 everywhere.
 	for name, path := range map[string]string{
-		"project":  "/v1/projects/" + projectA,
-		"thread":   "/v1/threads/" + threadA,
-		"run":      "/v1/runs/" + runA,
-		"messages": "/v1/threads/" + threadA + "/messages",
-		"events":   "/v1/runs/" + runA + "/events",
-		"report":   "/v1/runs/" + runA + "/report",
+		"project":    "/v1/projects/" + projectA,
+		"thread":     "/v1/threads/" + threadA,
+		"run":        "/v1/runs/" + runA,
+		"messages":   "/v1/threads/" + threadA + "/messages",
+		"threadruns": "/v1/threads/" + threadA + "/runs",
+		"events":     "/v1/runs/" + runA + "/events",
+		"report":     "/v1/runs/" + runA + "/report",
 	} {
 		status, _, raw := e.do(http.MethodGet, path, e.headers(e.tenantBS), "")
 		if status != http.StatusNotFound {
@@ -334,6 +337,303 @@ func (e *env) startRun(t *testing.T, threadID string) string {
 		t.Fatal(err)
 	}
 	return run["id"].(string)
+}
+
+// seedRunAt inserts a run through the real store with an explicit creation
+// instant, so read-path tests pin exact ordering without racing the pipeline
+// (which allows only one live run per thread).
+func (e *env) seedRunAt(t *testing.T, tenantSlug, threadID string, at time.Time) string {
+	t.Helper()
+	tenant, err := e.application.Repos.Tenants.GetBySlug(context.Background(), tenantSlug)
+	if err != nil {
+		t.Fatalf("resolve fixture tenant: %v", err)
+	}
+	idStr, err := domain.NewID(domain.PrefixRun)
+	if err != nil {
+		t.Fatalf("generate run id: %v", err)
+	}
+	run, err := domain.NewRun(domain.RunID(idStr), tenant.ID, domain.ThreadID(threadID), "seeded-"+uniqueSuffix(), at)
+	if err != nil {
+		t.Fatalf("construct run: %v", err)
+	}
+	if err := e.application.Repos.Runs.Create(context.Background(), run); err != nil {
+		t.Fatalf("seed run: %v", err)
+	}
+	return string(run.ID)
+}
+
+// runPage mirrors the GET /v1/threads/{id}/runs envelope. Runs is a pointer
+// so the empty case can pin "array, never JSON null".
+type runPage struct {
+	Runs *[]struct {
+		ID  string `json:"id"`
+		Seq int64  `json:"seq"`
+	} `json:"runs"`
+	Total int64 `json:"total"`
+}
+
+// TestListThreadRunsPaginationReachesTrueLatest pins the accepted fix for
+// the release-blocking defect behind the console's reattachment claim: a
+// single bounded first page does NOT contain the newest run once history
+// outgrows the server page size (the pre-fix reproduction failed exactly
+// there), so clients must walk keyset pages through the authoritative total
+// and take the last item of the final page as the true latest. This test
+// walks those pages black-box style: each resume cursor is the last
+// observed run's store-assigned sequence, exactly as the console does it.
+func TestListThreadRunsPaginationReachesTrueLatest(t *testing.T) {
+	// Comfortably above the server's bounded default page; if that limit is
+	// ever raised past this seed count, the tripwire below forces this test
+	// to be revisited consciously rather than silently passing.
+	const seeded = 205
+	e := newEnv(t)
+	_, threadID := e.seedProjectThread(e.tenantAS)
+
+	base := time.Now().UTC().Add(-seeded * time.Second)
+	ids := make([]string, 0, seeded)
+	for i := 0; i < seeded; i++ {
+		ids = append(ids, e.seedRunAt(t, e.tenantAS, threadID, base.Add(time.Duration(i)*time.Second)))
+	}
+	newest := ids[seeded-1]
+
+	var first runPage
+	e.doJSON(t, http.MethodGet, "/v1/threads/"+threadID+"/runs", e.tenantAS, nil, &first, http.StatusOK)
+	if first.Runs == nil {
+		t.Fatalf("runs must be an array, never null")
+	}
+	if first.Total != seeded {
+		t.Fatalf("total must count every recorded run: got %d, want %d", first.Total, seeded)
+	}
+	pageSize := len(*first.Runs)
+	if pageSize == 0 || int64(pageSize) >= first.Total {
+		t.Fatalf("tripwire: server page limit no longer produces multiple pages for %d seeded runs (page length %d); raise the seed count", seeded, pageSize)
+	}
+	if (*first.Runs)[0].ID != ids[0] {
+		t.Fatalf("creation-order contract drifted: first page starts at %s, want %s", (*first.Runs)[0].ID, ids[0])
+	}
+
+	// Walk pages exactly like the console helper: resume at the last
+	// consumed run's sequence value until the authoritative total is
+	// exhausted.
+	collected := map[string]bool{}
+	order := make([]string, 0, seeded)
+	cursor := int64(0)
+	for _, r := range *first.Runs {
+		collected[r.ID] = true
+		order = append(order, r.ID)
+		cursor = r.Seq
+	}
+	for int64(len(collected)) < first.Total {
+		var page runPage
+		e.doJSON(t, http.MethodGet,
+			fmt.Sprintf("/v1/threads/%s/runs?after=%d", threadID, cursor),
+			e.tenantAS, nil, &page, http.StatusOK)
+		if page.Runs == nil {
+			t.Fatalf("resume page after=%d must be an array, never null", cursor)
+		}
+		if page.Total != seeded {
+			t.Fatalf("stable pagination must keep total at %d across pages, got %d at after=%d", seeded, page.Total, cursor)
+		}
+		for _, r := range *page.Runs {
+			if collected[r.ID] {
+				t.Fatalf("keyset pages must never overlap: duplicate %s at after=%d", r.ID, cursor)
+			}
+			if r.Seq <= cursor {
+				t.Fatalf("sequences must strictly increase across resumed pages: %d after cursor %d", r.Seq, cursor)
+			}
+			collected[r.ID] = true
+			order = append(order, r.ID)
+			cursor = r.Seq
+		}
+	}
+	if len(collected) != seeded {
+		t.Fatalf("walked pages must cover every run exactly once: saw %d of %d", len(collected), seeded)
+	}
+	if order[len(order)-1] != newest {
+		t.Fatalf("true latest run must be the final item of the final page: got %s, want %s", order[len(order)-1], newest)
+	}
+}
+
+// TestListThreadRunsBackdatedCreationLandsAtTail pins the release-blocker
+// regression behind the keyset migration at the HTTP boundary: a run whose
+// created_at predates everything already listed (what a service-clock
+// rollback produces) still appears strictly AFTER all consumed history,
+// so a walking reader neither duplicates nor omits anything and reattaches
+// to the true latest run.
+func TestListThreadRunsBackdatedCreationLandsAtTail(t *testing.T) {
+	e := newEnv(t)
+	_, threadID := e.seedProjectThread(e.tenantAS)
+
+	now := time.Now().UTC()
+	first := e.seedRunAt(t, e.tenantAS, threadID, now.Add(-30*time.Second))
+	second := e.seedRunAt(t, e.tenantAS, threadID, now.Add(-20*time.Second))
+
+	var before runPage
+	e.doJSON(t, http.MethodGet, "/v1/threads/"+threadID+"/runs?after=0", e.tenantAS, nil, &before, http.StatusOK)
+	if before.Total != 2 || len(*before.Runs) != 2 {
+		t.Fatalf("initial history: %d runs (total %d), want 2", len(*before.Runs), before.Total)
+	}
+	consumedThroughSeq := (*before.Runs)[1].Seq
+
+	// The backdated insert: created BEFORE both listed runs' timestamps.
+	backdated := e.seedRunAt(t, e.tenantAS, threadID, now.Add(-60*time.Second))
+
+	var after runPage
+	e.doJSON(t, http.MethodGet,
+		fmt.Sprintf("/v1/threads/%s/runs?after=%d", threadID, consumedThroughSeq),
+		e.tenantAS, nil, &after, http.StatusOK)
+	if after.Total != 3 {
+		t.Fatalf("total must grow to %d after the backdated insert, got %d", 3, after.Total)
+	}
+	pageRuns := *after.Runs
+	if len(pageRuns) != 1 || pageRuns[0].ID != backdated {
+		t.Fatalf("resuming at seq %d must serve exactly the backdated run %s, got %+v",
+			consumedThroughSeq, backdated, pageRuns)
+	}
+
+	// A fresh walk covers every run exactly once, in insertion order, with
+	// the backdated run LAST — the latest run is the true latest.
+	var full runPage
+	e.doJSON(t, http.MethodGet, "/v1/threads/"+threadID+"/runs", e.tenantAS, nil, &full, http.StatusOK)
+	got := []string{}
+	for _, r := range *full.Runs {
+		got = append(got, r.ID)
+	}
+	want := []string{first, second, backdated}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("history position %d = %s, want %s (insertion order regardless of timestamps)", i, got[i], want[i])
+		}
+	}
+}
+
+// TestListThreadRunsCursorGrammar pins the shared `after` grammar at the
+// HTTP boundary for every list endpoint that takes it (thread runs, thread
+// messages, run events): omitted defaults to 0, an explicit 0 is accepted,
+// and everything outside the OpenAPI schema — repeated parameters, explicit
+// empties, whitespace or sign padding, negatives, non-digits, values beyond
+// int64 — is a typed invalid_cursor problem instead of a silent fallback.
+func TestListThreadRunsCursorGrammar(t *testing.T) {
+	e := newEnv(t)
+	_, threadID := e.seedProjectThread(e.tenantAS)
+	runID := e.startRun(t, threadID)
+
+	endpoints := map[string]string{
+		"runs":     "/v1/threads/" + threadID + "/runs",
+		"messages": "/v1/threads/" + threadID + "/messages",
+		"events":   "/v1/runs/" + runID + "/events",
+	}
+
+	accepted := map[string]string{
+		"omitted":      "",
+		"explicitzero": "?after=0",
+	}
+	for name, endpoint := range endpoints {
+		for caseName, query := range accepted {
+			status, _, raw := e.do(http.MethodGet, endpoint+query, e.headers(e.tenantAS), "")
+			if status != http.StatusOK {
+				t.Errorf("%s: %s cursor must be accepted with 200, got %d (%s)", name, caseName, status, raw)
+			}
+		}
+	}
+
+	rejected := map[string]string{
+		"empty":       "?after=",
+		"leadspace":   "?after=%201",
+		"trailspace":  "?after=1%20",
+		"plussign":    "?after=%2B1",
+		"negative":    "?after=-1",
+		"malformed":   "?after=abc",
+		"float":       "?after=1.5",
+		"overflow":    "?after=99999999999999999999",
+		"maxoverflow": "?after=9223372036854775808",
+		"repeated":    "?after=1&after=2",
+	}
+	for name, endpoint := range endpoints {
+		for caseName, query := range rejected {
+			status, _, raw := e.do(http.MethodGet, endpoint+query, e.headers(e.tenantAS), "")
+			if status != http.StatusBadRequest {
+				t.Errorf("%s: %s cursor must be rejected with 400, got %d (%s)", name, caseName, status, raw)
+				continue
+			}
+			var problem struct {
+				Code string `json:"code"`
+			}
+			if err := json.Unmarshal(raw, &problem); err != nil || problem.Code != "invalid_cursor" {
+				t.Errorf("%s: %s cursor rejection must be typed invalid_cursor: %s", name, caseName, raw)
+			}
+		}
+	}
+}
+
+// TestListThreadRuns pins the read contract the web console uses to discover
+// and reattach to a thread's runs: stable oldest-first order, cursor
+// pagination boundaries, an explicit empty page for a runless thread,
+// uniform not-found for unknown threads, and authentication enforcement.
+func TestListThreadRuns(t *testing.T) {
+	e := newEnv(t)
+	_, threadID := e.seedProjectThread(e.tenantAS)
+
+	// Unauthenticated reads are refused like every other authenticated route.
+	status, _, raw := e.do(http.MethodGet, "/v1/threads/"+threadID+"/runs", map[string]string{}, "")
+	if status != http.StatusUnauthorized {
+		t.Fatalf("unauthenticated list must be 401, got %d (%s)", status, raw)
+	}
+
+	runA := e.startRun(t, threadID)
+	// Two further runs are seeded straight into the real store so the stable
+	// order is exact regardless of pipeline timing; the read path under test
+	// cannot tell them from API-started ones.
+	runB := e.seedRunAt(t, e.tenantAS, threadID, time.Now().UTC().Add(time.Second))
+	runC := e.seedRunAt(t, e.tenantAS, threadID, time.Now().UTC().Add(2*time.Second))
+
+	var full runPage
+	e.doJSON(t, http.MethodGet, "/v1/threads/"+threadID+"/runs", e.tenantAS, nil, &full, http.StatusOK)
+	if full.Runs == nil || len(*full.Runs) != 3 || full.Total != 3 {
+		t.Fatalf("expected three runs with total 3, got %+v (total %d)", full.Runs, full.Total)
+	}
+	wantOrder := []string{runA, runB, runC}
+	for i, want := range wantOrder {
+		if got := (*full.Runs)[i].ID; got != want {
+			t.Fatalf("position %d = %s, want %s (created asc)", i, got, want)
+		}
+	}
+
+	// The second page resumes exactly after the first entry of the stable
+	// oldest-first order, reaching strictly newer runs.
+	var tail runPage
+	e.doJSON(t, http.MethodGet, "/v1/threads/"+threadID+"/runs?after=1", e.tenantAS, nil, &tail, http.StatusOK)
+	if tail.Runs == nil || len(*tail.Runs) != 2 || (*tail.Runs)[0].ID != runB || tail.Total != 3 {
+		t.Fatalf("after=1 must resume at the second entry with unchanged total: %+v total %d", tail.Runs, tail.Total)
+	}
+
+	// A cursor beyond the end is an empty page, not an error.
+	var beyond runPage
+	e.doJSON(t, http.MethodGet, "/v1/threads/"+threadID+"/runs?after=99", e.tenantAS, nil, &beyond, http.StatusOK)
+	if beyond.Runs == nil || len(*beyond.Runs) != 0 || beyond.Total != 3 {
+		t.Fatalf("beyond-max cursor must be empty with stable total: %+v total %d", beyond.Runs, beyond.Total)
+	}
+
+	// A thread that exists but never ran yields an explicit empty array —
+	// never null — so clients can rely on the array contract.
+	_, emptyThread := e.seedProjectThread(e.tenantAS)
+	var none runPage
+	e.doJSON(t, http.MethodGet, "/v1/threads/"+emptyThread+"/runs", e.tenantAS, nil, &none, http.StatusOK)
+	if none.Runs == nil || len(*none.Runs) != 0 || none.Total != 0 {
+		t.Fatalf("runless thread must list an empty non-null page: %+v total %d", none.Runs, none.Total)
+	}
+
+	// Unknown thread ids are uniform not-found problems (no existence oracle).
+	missing := "thr_" + strings.Repeat("missing", 4)
+	status, _, raw = e.do(http.MethodGet, "/v1/threads/"+missing+"/runs", e.headers(e.tenantAS), "")
+	if status != http.StatusNotFound {
+		t.Fatalf("missing thread must be uniform 404, got %d (%s)", status, raw)
+	}
+	var problem struct {
+		Code string `json:"code"`
+	}
+	if err := json.Unmarshal(raw, &problem); err != nil || problem.Code == "" {
+		t.Fatalf("not-found must be a problem document: %s", raw)
+	}
 }
 
 func TestReportNotReadyWhileRunningAndCancelConflictsAfterFinish(t *testing.T) {

@@ -155,6 +155,7 @@ func APIRoutes() []Route {
 		{Method: http.MethodPost, Path: "/v1/threads/{id}/messages", Auth: true},
 		{Method: http.MethodGet, Path: "/v1/threads/{id}/messages", Auth: true},
 		{Method: http.MethodPost, Path: "/v1/threads/{id}/runs", Auth: true},
+		{Method: http.MethodGet, Path: "/v1/threads/{id}/runs", Auth: true},
 		{Method: http.MethodGet, Path: "/v1/runs/{id}", Auth: true},
 		{Method: http.MethodGet, Path: "/v1/runs/{id}/events", Auth: true},
 		{Method: http.MethodPost, Path: "/v1/runs/{id}/cancel", Auth: true},
@@ -205,7 +206,11 @@ func (s *Server) routes(mux *http.ServeMux) {
 					handler = s.handleAppendMessage
 				}
 			case "/v1/threads/{id}/runs":
-				handler = s.handleStartRun
+				if route.Method == http.MethodGet {
+					handler = s.handleListThreadRuns
+				} else {
+					handler = s.handleStartRun
+				}
 			case "/v1/runs/{id}":
 				handler = s.handleGetRun
 			case "/v1/runs/{id}/events":

@@ -8,26 +8,22 @@ import { ReportView } from "@/app/threads/[id]/report-view";
 import { StatusBadge } from "@/components/status-badge";
 import { humanStatus } from "@/app/threads/threads-view";
 import { api, errorCode } from "@/lib/client-api";
+import { isTerminalRun } from "@/lib/runs";
 import { runKind, taskKind } from "@/lib/status";
-
-const TERMINAL_RUN = new Set(["completed", "failed", "cancelled"]);
 
 /**
  * Live run panel. While the run executes it polls the durable record on a
- * bounded interval; the event stream resumes from its own `seq` cursor so a
- * reload or reconnect never replays or skips history.
- *
- * `/v1` exposes runs by id only (no list-by-thread yet), so the panel is
- * anchored to the run id captured from this console's own start action,
- * kept per browser tab in sessionStorage. Reopening elsewhere shows the
- * truthful thread status while the run completes without a live panel;
- * closing this gap is named in the tranche evidence, not papered over.
+ * bounded interval and stops once the run is terminal; the event stream
+ * resumes from its own `seq` cursor so a reload or reconnect neither replays
+ * nor skips history. The workspace picks the run id from the thread's run
+ * history, so this panel reattaches anywhere the thread is reopened.
  */
 export function RunPanel({ runId }: { runId: string }) {
   const runQuery = useQuery({
     queryKey: ["run", runId],
     queryFn: () => api.getRunWithTasks(runId),
-    refetchInterval: 1500,
+    refetchInterval: ({ state }) =>
+      state.data && isTerminalRun(state.data.run) ? false : 1500,
   });
 
   if (runQuery.isPending) {
@@ -78,7 +74,7 @@ export function RunPanel({ runId }: { runId: string }) {
             <StatusBadge label={humanStatus(run.status)} kind={runKind(run.status)} />
           ) : null}
         </div>
-        {run && !TERMINAL_RUN.has(run.status) ? <CancelButton runId={run.id} /> : null}
+        {run && !isTerminalRun(run) ? <CancelButton runId={run.id} /> : null}
       </header>
 
       {(data.tasks ?? []).length > 0 ? (
@@ -112,9 +108,19 @@ export function RunPanel({ runId }: { runId: string }) {
         <p style={{ color: "var(--ink-2)" }}>Planning the work…</p>
       )}
 
-      <EventTrail runId={runId} active={run ? !TERMINAL_RUN.has(run.status) : false} />
+      <EventTrail runId={runId} active={run ? !isTerminalRun(run) : false} />
 
-      {run && TERMINAL_RUN.has(run.status) ? <ReportView runId={run.id} /> : null}
+      {run && isTerminalRun(run) ? (
+        run.status === "cancelled" ? (
+          // A cancelled run never produces a report (the API answers 409),
+          // so the terminal state names that truthfully instead of probing.
+          <div role="note" className="banner banner-attention" style={{ marginTop: 12 }} data-testid="run-cancelled">
+            <span>Run cancelled before completion — no report was produced.</span>
+          </div>
+        ) : (
+          <ReportView runId={run.id} />
+        )
+      ) : null}
     </section>
   );
 }
