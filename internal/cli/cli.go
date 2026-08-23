@@ -136,15 +136,33 @@ func runMigrate(args []string, stdout, stderr io.Writer) int {
 	return exitOK
 }
 
-// RunServe starts the API server and blocks until SIGINT/SIGTERM.
+// RunServe starts the API server and blocks until SIGINT/SIGTERM. It accepts
+// the arguments after "serve" and also tolerates a single leading literal
+// "serve" positional, so both `ants serve --config …` and entrypoints that
+// forward the full argument vector keep working. Configuration layering is
+// truthful: --config wins over ANTS_CONFIG, which wins over defaults.
 func RunServe(args []string, stdout, stderr io.Writer) int {
+	if len(args) > 0 && args[0] == "serve" {
+		args = args[1:]
+	}
 	fs := flag.NewFlagSet("serve", flag.ContinueOnError)
-	configPath := fs.String("config", "", "path to a YAML configuration file")
+	configPath := fs.String("config", "", "path to a YAML configuration file (overrides ANTS_CONFIG)")
 	fs.SetOutput(stderr)
 	if err := fs.Parse(args); err != nil {
 		return exitUsage
 	}
-	cfg, err := config.Load(*configPath)
+	// A leftover positional here means the caller passed something this
+	// command never documented; refusing beats silently serving with
+	// defaults while an operand goes unread.
+	if len(fs.Args()) > 0 {
+		fmt.Fprintf(stderr, "unexpected argument %q for serve\n", fs.Args()[0])
+		return exitUsage
+	}
+	path := *configPath
+	if path == "" {
+		path = os.Getenv("ANTS_CONFIG")
+	}
+	cfg, err := config.Load(path)
 	if err != nil {
 		fmt.Fprintf(stderr, "configuration invalid:\n%v\n", err)
 		return exitFailure
