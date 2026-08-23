@@ -8,7 +8,7 @@ import { MessageList } from "@/app/threads/[id]/message-list";
 import { RunPanel } from "@/app/threads/[id]/run-panel";
 import { ExpiredNotice, humanStatus } from "@/app/threads/threads-view";
 import { StatusBadge } from "@/components/status-badge";
-import { api, errorCode } from "@/lib/client-api";
+import { api, errorCode, listAllThreadRuns } from "@/lib/client-api";
 import { isTerminalRun, latestRun } from "@/lib/runs";
 import { threadKind } from "@/lib/status";
 
@@ -19,8 +19,12 @@ const THREAD_LIVE = new Set(["planning", "executing", "reviewing", "fixing"]);
  * live event trail, and the terminal report are legible together.
  *
  * Which run to show is decided from server truth alone: the run-history
- * list names every run of the thread oldest-first, so reopening a thread
- * here reattaches to its live/latest run in any tab, on any device.
+ * helper walks every positional page through the authoritative total, so
+ * the history ends with the true latest run and reopening a thread here
+ * reattaches to its live/latest run in any tab, on any device — even when
+ * the history outgrows one server page. One React Query key owns the whole
+ * traversal, so polling re-runs it as a single sequential request chain
+ * with no duplicate concurrent calls.
  */
 export function WorkspaceView({ threadId }: { threadId: string }) {
   const queryClient = useQueryClient();
@@ -39,7 +43,7 @@ export function WorkspaceView({ threadId }: { threadId: string }) {
 
   const runsQuery = useQuery({
     queryKey: ["thread-runs", threadId],
-    queryFn: () => api.listThreadRuns(threadId, 0),
+    queryFn: () => listAllThreadRuns(threadId),
     // Keep discovering while the thread moves or its newest run is live;
     // once both settle there is nothing new to find.
     refetchInterval: ({ state }) => {
