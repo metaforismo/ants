@@ -31,9 +31,10 @@ duration, correlation id (honored from `X-Request-ID` when well-formed,
 generated otherwise, always echoed), and a bounded remote class; raw paths,
 query strings, headers, bodies, identifiers, secrets, and client addresses
 have no code path into logs (ADR-0017). The effective correlation id flows
-through the application seam into the `trace_id` slot of every event and
-audit record committed while serving that request — response header, log
-line, event history, and audit trail join on one identifier — while work
+through the application seam into the `trace_id` slot of every event
+committed while serving that request — response header, log line, and event
+history join on one identifier; audit records follow the same rule whenever
+one is written (none are synchronous to HTTP today) — while work
 outside any request (worker execution, dispatch, retention) keeps empty
 trace ids and operator actions carry their explicit `--trace-id`
 (ADR-0018). Alert-ready PromQL baselines over the closed metric set live in

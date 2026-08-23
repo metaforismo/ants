@@ -409,24 +409,26 @@ func TestWorkerExecutionKeepsNoRequestIdentity(t *testing.T) {
 	if aerr != nil {
 		t.Fatal(aerr)
 	}
-	correlated := map[string]string{} // trace -> event type
+	// Occurrences per trace, not a deduplicated map: an identity stamped
+	// onto more than one event is exactly the leak this test exists to catch,
+	// so every correlated trace must account for exactly one event.
+	correlated := map[string][]domain.EventType{} // trace -> types carrying it
 	for _, evt := range allEvents {
 		if evt.TraceID != "" {
-			correlated[evt.TraceID] = string(evt.Type)
+			correlated[evt.TraceID] = append(correlated[evt.TraceID], evt.Type)
 		}
 	}
-	if _, ok := correlated[runReqID]; !ok || len(correlated) < 1 {
-		t.Errorf("the run-start correlation must appear on the planning transition; have %v", correlated)
+	if got := correlated[runReqID]; len(got) != 1 || got[0] != domain.EventThreadStatusChanged {
+		t.Errorf("exactly the planning transition must carry the run-start correlation, got %v", got)
 	}
-	for trace, typ := range correlated {
-		switch {
-		case trace == runReqID && typ == string(domain.EventThreadStatusChanged):
-			// Exactly the request-scoped StartRun emission.
-		case typ == string(domain.EventTenantCreated):
-			// Correlations of the env's own setup requests — served
-			// requests too, just not this one.
-		default:
-			t.Errorf("unexpected correlated event outside any served request: %s on %s", trace, typ)
+	for trace, types := range correlated {
+		if trace == runReqID {
+			continue // asserted above: the one request-scoped emission
+		}
+		// Every other correlation belongs to a tenant-created event of this
+		// env's own setup requests — served requests too, just not this one.
+		if len(types) != 1 || types[0] != domain.EventTenantCreated {
+			t.Errorf("unexpected correlated event outside any served request: %s -> %v", trace, types)
 		}
 	}
 }

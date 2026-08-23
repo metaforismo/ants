@@ -85,12 +85,16 @@ contributes its carried identifier; otherwise the field stays empty.
 Event `trace_id` and audit `trace_id` draw from the same carrier, the same
 grammar, and the same precedence rule, so a single identifier joins an HTTP
 response, its request-log record, every event committed while serving it,
-and any audit record written in that window — provable by equality tests.
-Where a durable record already exists on denied/failure paths (policy
-denials during execution write denied-result audits), those records follow
-the same rule: they carry the carrier of the context that produced them and
-nothing else. No new audit records are introduced for auth denials; the API
-problem response plus the request log remain the denial trail.
+and any audit record written in that window. The audit leg is pinned by
+equality test at the policy-engine seam; this release has no synchronous
+audit emission for HTTP-triggered commands (policy audits occur during
+worker execution and deliberately stay empty), so no end-to-end HTTP audit
+equality is claimed or tested today. Where a durable record already exists
+on denied/failure paths (policy denials during execution write denied-result
+audits), those records follow the same rule: they carry the carrier of the
+context that produced them and nothing else. No new audit records are
+introduced for auth denials; the API problem response plus the request log
+remain the denial trail.
 
 ### Transaction behavior
 
@@ -137,9 +141,13 @@ persisted envelopes; multi-node dispatcher concerns (unchanged, ADR-0011/
 
 ## Consequences
 
-- Response header == request log id == persisted event `trace_id` == related
-  audit correlation for every HTTP-triggered command, pinned by integration
-  tests including concurrency, failure rollback, and auth-denial paths.
+- Response header == request log id == persisted event `trace_id` for every
+  HTTP-triggered command that commits events synchronously today (tenant
+  creation, StartRun's planning transition), pinned by integration tests
+  including concurrency, failure rollback, and auth-denial paths. Any audit
+  record written while serving a request carries the same carrier value by
+  the same mechanism (pinned at the policy seam); none are written
+  synchronously in this release.
 - Operators can finally answer "which request caused this event?" with one
   equality join instead of timestamp guesswork; the alerting runbook gains a
   concrete investigation path.
