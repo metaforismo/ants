@@ -148,11 +148,44 @@ type Policy struct {
 // Outbox bounds the in-process dispatcher that drains durably queued
 // events. Defaults suit a single node; every value validates at startup.
 type Outbox struct {
-	BatchSize        int      `yaml:"batch_size"`
-	Interval         Duration `yaml:"interval"`
-	Lease            Duration `yaml:"lease"`
-	MaxAttempts      int      `yaml:"max_attempts"`
-	RetryBackoffBase Duration `yaml:"retry_backoff_base"`
+	BatchSize        int             `yaml:"batch_size"`
+	Interval         Duration        `yaml:"interval"`
+	Lease            Duration        `yaml:"lease"`
+	MaxAttempts      int             `yaml:"max_attempts"`
+	RetryBackoffBase Duration        `yaml:"retry_backoff_base"`
+	Retention        OutboxRetention `yaml:"retention"`
+}
+
+// OutboxRetention configures garbage collection of terminal outbox rows
+// (ADR-0016). A horizon of zero exempts its class entirely, so the default
+// configuration is structurally inert: nothing is ever deleted until an
+// operator sets an explicit nonzero horizon. Delivered rows are delivery
+// bookkeeping (the durable event carries the content); discarded rows record
+// operator triage and are expected to outlive delivered ones.
+type OutboxRetention struct {
+	DeliveredAfter Duration `yaml:"delivered_after"`
+	DiscardedAfter Duration `yaml:"discarded_after"`
+	BatchSize      int      `yaml:"batch_size"`
+	Interval       Duration `yaml:"interval"`
+}
+
+func (r OutboxRetention) Validate() error {
+	if r.DeliveredAfter.Duration < 0 || r.DiscardedAfter.Duration < 0 {
+		return fmt.Errorf("outbox.retention horizons must not be negative")
+	}
+	if r.BatchSize < 1 || r.BatchSize > 1000 {
+		return fmt.Errorf("outbox.retention.batch_size must be within [1,1000], got %d", r.BatchSize)
+	}
+	if r.Interval.Duration < time.Second {
+		return fmt.Errorf("outbox.retention.interval must be at least 1s, got %s", r.Interval)
+	}
+	return nil
+}
+
+// Active reports whether any retention horizon is configured; only an active
+// configuration may delete anything (ADR-0016).
+func (r OutboxRetention) Active() bool {
+	return r.DeliveredAfter.Duration > 0 || r.DiscardedAfter.Duration > 0
 }
 
 // Worker bounds the process-level run executor that claims durable run
@@ -289,6 +322,12 @@ func Defaults() Config {
 			Lease:            Duration{30 * time.Second},
 			MaxAttempts:      5,
 			RetryBackoffBase: Duration{500 * time.Millisecond},
+			Retention: OutboxRetention{
+				DeliveredAfter: Duration{0},
+				DiscardedAfter: Duration{0},
+				BatchSize:      500,
+				Interval:       Duration{time.Hour},
+			},
 		},
 		Worker: Worker{
 			BatchSize:      8,
@@ -376,6 +415,9 @@ func (c Config) Validate() error {
 		return fmt.Errorf("scm.driver %q is not supported", c.SCM.Driver)
 	}
 	if err := c.Outbox.Validate(); err != nil {
+		return err
+	}
+	if err := c.Outbox.Retention.Validate(); err != nil {
 		return err
 	}
 	if err := c.Worker.Validate(); err != nil {
@@ -552,6 +594,18 @@ func (c *Config) ApplyEnv(lookup LookupFunc) error {
 	if err := durVar(envOutboxBackoff, &c.Outbox.RetryBackoffBase); err != nil {
 		return err
 	}
+	if err := durVar(envOutboxRetentionDeliveredAfter, &c.Outbox.Retention.DeliveredAfter); err != nil {
+		return err
+	}
+	if err := durVar(envOutboxRetentionDiscardedAfter, &c.Outbox.Retention.DiscardedAfter); err != nil {
+		return err
+	}
+	if err := intVar(envOutboxRetentionBatchSize, &c.Outbox.Retention.BatchSize); err != nil {
+		return err
+	}
+	if err := durVar(envOutboxRetentionInterval, &c.Outbox.Retention.Interval); err != nil {
+		return err
+	}
 	if err := intVar(envWorkerBatchSize, &c.Worker.BatchSize); err != nil {
 		return err
 	}
@@ -595,40 +649,44 @@ func (c *Config) ApplyEnv(lookup LookupFunc) error {
 
 // Environment variable names. Kept in one place so docs and code cannot drift.
 const (
-	envServerAddr             = "ANTS_SERVER_HTTP_ADDR"
-	envServerDevAuth          = "ANTS_SERVER_DEV_AUTH"
-	envServerIdleTimeout      = "ANTS_SERVER_IDLE_TIMEOUT"
-	envServerReadinessTimeout = "ANTS_SERVER_READINESS_TIMEOUT"
-	envStoreMode              = "ANTS_STORE_MODE"
-	envStorePostgresDSN       = "ANTS_STORE_POSTGRES_DSN"
-	envStorePgMaxOpen         = "ANTS_STORE_POOL_MAX_OPEN_CONNS"
-	envStorePgMaxIdle         = "ANTS_STORE_POOL_MAX_IDLE_CONNS"
-	envOrchMaxParallel        = "ANTS_ORCHESTRATOR_MAX_PARALLEL_TASKS"
-	envOrchMaxTasksRun        = "ANTS_ORCHESTRATOR_MAX_TASKS_PER_RUN"
-	envOrchMaxExecOpsRun      = "ANTS_ORCHESTRATOR_MAX_EXEC_OPS_PER_RUN"
-	envOrchTaskTimeout        = "ANTS_ORCHESTRATOR_TASK_TIMEOUT"
-	envOrchStageTimeout       = "ANTS_ORCHESTRATOR_STAGE_TIMEOUT"
-	envOrchMaxAttempts        = "ANTS_ORCHESTRATOR_MAX_ATTEMPTS"
-	envOrchRetryBackoff       = "ANTS_ORCHESTRATOR_RETRY_BACKOFF_BASE"
-	envSandboxDriver          = "ANTS_SANDBOX_DRIVER"
-	envSandboxWorkRoot        = "ANTS_SANDBOX_WORK_ROOT"
-	envSCMDriver              = "ANTS_SCM_DRIVER"
-	envPolicyAllowCommits     = "ANTS_POLICY_ALLOW_LOCAL_COMMITS"
-	envOutboxBatchSize        = "ANTS_OUTBOX_BATCH_SIZE"
-	envOutboxInterval         = "ANTS_OUTBOX_INTERVAL"
-	envOutboxLease            = "ANTS_OUTBOX_LEASE"
-	envOutboxMaxAttempts      = "ANTS_OUTBOX_MAX_ATTEMPTS"
-	envOutboxBackoff          = "ANTS_OUTBOX_RETRY_BACKOFF_BASE"
-	envWorkerBatchSize        = "ANTS_WORKER_BATCH_SIZE"
-	envWorkerInterval         = "ANTS_WORKER_INTERVAL"
-	envWorkerLease            = "ANTS_WORKER_LEASE"
-	envWorkerHeartbeat        = "ANTS_WORKER_HEARTBEAT_EVERY"
-	envWorkerCleanup          = "ANTS_WORKER_CLEANUP_TIMEOUT"
-	envWorkerConcurrency      = "ANTS_WORKER_CONCURRENCY"
-	envWorkerMaxAttempts      = "ANTS_WORKER_MAX_ATTEMPTS"
-	envMetricsEnabled         = "ANTS_METRICS_ENABLED"
-	envLogLevel               = "ANTS_LOG_LEVEL"
-	envLogFormat              = "ANTS_LOG_FORMAT"
+	envServerAddr                    = "ANTS_SERVER_HTTP_ADDR"
+	envServerDevAuth                 = "ANTS_SERVER_DEV_AUTH"
+	envServerIdleTimeout             = "ANTS_SERVER_IDLE_TIMEOUT"
+	envServerReadinessTimeout        = "ANTS_SERVER_READINESS_TIMEOUT"
+	envStoreMode                     = "ANTS_STORE_MODE"
+	envStorePostgresDSN              = "ANTS_STORE_POSTGRES_DSN"
+	envStorePgMaxOpen                = "ANTS_STORE_POOL_MAX_OPEN_CONNS"
+	envStorePgMaxIdle                = "ANTS_STORE_POOL_MAX_IDLE_CONNS"
+	envOrchMaxParallel               = "ANTS_ORCHESTRATOR_MAX_PARALLEL_TASKS"
+	envOrchMaxTasksRun               = "ANTS_ORCHESTRATOR_MAX_TASKS_PER_RUN"
+	envOrchMaxExecOpsRun             = "ANTS_ORCHESTRATOR_MAX_EXEC_OPS_PER_RUN"
+	envOrchTaskTimeout               = "ANTS_ORCHESTRATOR_TASK_TIMEOUT"
+	envOrchStageTimeout              = "ANTS_ORCHESTRATOR_STAGE_TIMEOUT"
+	envOrchMaxAttempts               = "ANTS_ORCHESTRATOR_MAX_ATTEMPTS"
+	envOrchRetryBackoff              = "ANTS_ORCHESTRATOR_RETRY_BACKOFF_BASE"
+	envSandboxDriver                 = "ANTS_SANDBOX_DRIVER"
+	envSandboxWorkRoot               = "ANTS_SANDBOX_WORK_ROOT"
+	envSCMDriver                     = "ANTS_SCM_DRIVER"
+	envPolicyAllowCommits            = "ANTS_POLICY_ALLOW_LOCAL_COMMITS"
+	envOutboxBatchSize               = "ANTS_OUTBOX_BATCH_SIZE"
+	envOutboxInterval                = "ANTS_OUTBOX_INTERVAL"
+	envOutboxLease                   = "ANTS_OUTBOX_LEASE"
+	envOutboxMaxAttempts             = "ANTS_OUTBOX_MAX_ATTEMPTS"
+	envOutboxBackoff                 = "ANTS_OUTBOX_RETRY_BACKOFF_BASE"
+	envOutboxRetentionDeliveredAfter = "ANTS_OUTBOX_RETENTION_DELIVERED_AFTER"
+	envOutboxRetentionDiscardedAfter = "ANTS_OUTBOX_RETENTION_DISCARDED_AFTER"
+	envOutboxRetentionBatchSize      = "ANTS_OUTBOX_RETENTION_BATCH_SIZE"
+	envOutboxRetentionInterval       = "ANTS_OUTBOX_RETENTION_INTERVAL"
+	envWorkerBatchSize               = "ANTS_WORKER_BATCH_SIZE"
+	envWorkerInterval                = "ANTS_WORKER_INTERVAL"
+	envWorkerLease                   = "ANTS_WORKER_LEASE"
+	envWorkerHeartbeat               = "ANTS_WORKER_HEARTBEAT_EVERY"
+	envWorkerCleanup                 = "ANTS_WORKER_CLEANUP_TIMEOUT"
+	envWorkerConcurrency             = "ANTS_WORKER_CONCURRENCY"
+	envWorkerMaxAttempts             = "ANTS_WORKER_MAX_ATTEMPTS"
+	envMetricsEnabled                = "ANTS_METRICS_ENABLED"
+	envLogLevel                      = "ANTS_LOG_LEVEL"
+	envLogFormat                     = "ANTS_LOG_FORMAT"
 )
 
 var knownEnvVars = map[string]bool{
@@ -643,7 +701,10 @@ var knownEnvVars = map[string]bool{
 	envPolicyAllowCommits: true, envLogLevel: true, envLogFormat: true,
 	envOutboxBatchSize: true, envOutboxInterval: true, envOutboxLease: true,
 	envOutboxMaxAttempts: true, envOutboxBackoff: true,
-	envWorkerBatchSize: true, envWorkerInterval: true, envWorkerLease: true,
+	envOutboxRetentionDeliveredAfter: true, envOutboxRetentionDiscardedAfter: true,
+	envOutboxRetentionBatchSize: true,
+	envOutboxRetentionInterval:  true,
+	envWorkerBatchSize:          true, envWorkerInterval: true, envWorkerLease: true,
 	envWorkerHeartbeat: true, envWorkerCleanup: true, envWorkerConcurrency: true,
 	envWorkerMaxAttempts: true,
 	envMetricsEnabled:    true,

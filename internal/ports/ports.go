@@ -179,4 +179,12 @@ type OutboxStore interface {
 	GetDeadLetter(ctx context.Context, tenantID domain.TenantID, messageID string) (*DeadLetterSummary, error)
 	RequeueDeadLetter(ctx context.Context, req OutboxMutationRequest) (OutboxMutationResult, error)
 	DiscardDeadLetter(ctx context.Context, req OutboxMutationRequest) (OutboxMutationResult, error)
+
+	// SweepRetention performs one bounded retention round (ADR-0016):
+	// deletes at most Limit terminal rows — delivered and discarded only,
+	// each older than its configured horizon — oldest-terminal-first. The
+	// round is atomic per adapter (one unit of work on PostgreSQL), safe
+	// under concurrency, and idempotent on rerun. DryRun applies the
+	// identical eligibility logic without deleting.
+	SweepRetention(ctx context.Context, req RetentionSweepRequest) (RetentionSweepResult, error)
 }
