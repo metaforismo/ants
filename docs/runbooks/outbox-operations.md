@@ -94,8 +94,53 @@ consumer just produces audited churn — fix the sink first, then requeue.
 There is no automatic path from dead back to pending; every restart names
 an operator.
 
-Discard does not delete anything: retention/GC for terminal rows is a
-separate deferred policy (ADR-0015).
+Discard does not delete anything by itself: deletion belongs to retention.
+
+## Retention sweeps (ADR-0016)
+
+Terminal rows accumulate one-for-one with events: `delivered` rows are
+delivery bookkeeping (the durable event carries all content), `discarded`
+rows record operator triage. Retention deletes them in bounded rounds — and
+only them:
+
+- eligible: `delivered` older than `outbox.retention.delivered_after`;
+  `discarded` older than `outbox.retention.discarded_after` (age measured
+  from the terminal timestamp, inclusive at exactly the horizon);
+- never eligible: pending, leased, dead rows; rows whose terminal timestamp
+  is NULL; domain events; audit history. Dead letters stay forever until an
+  operator discards them, and discarded rows survive every round until their
+  horizon passes.
+
+Defaults are inert: both horizons unset means nothing is ever deleted.
+Configuring a horizon IS the opt-in. Each sweep deletes at most
+`outbox.retention.batch_size` (default 500) rows, delivered victims first,
+oldest-terminal-first within each class.
+
+```sh
+# What would a round collect right now? Never deletes:
+ants outbox retention preview [--config config/ants.local.yaml] [--json]
+
+# One bounded round; refuses without --yes and prints the same numbers:
+ants outbox retention sweep --yes [--json]
+```
+
+Output contract matches the rest of the CLI: one stable line per result,
+JSON object under `--json`, typed error triples on stderr, exit codes
+0/1/2 where 2 includes an unconfirmed sweep. The unconfirmed refusal runs
+the identical non-destructive selection first, so its message shows the real
+counts it declined to delete.
+
+When any horizon is configured, `serve` also runs sweeps automatically every
+`outbox.retention.interval` (default 1h); the loop stops first during
+graceful shutdown. Activity lands on
+`ants_outbox_retention_deleted_total{state}` and
+`ants_outbox_retention_rounds_total`.
+
+Recovery note: sweeps are atomic per round. A crashed process leaves either
+the whole round applied or none of it; rerunning converges to the same state
+because deletion is idempotent on already-deleted rows. Deleted rows are
+gone permanently — there is no undo — but the corresponding events remain in
+`events` untouched, so no domain history is lost by reclaiming queue space.
 
 ## Alerting notes
 

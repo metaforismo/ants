@@ -26,6 +26,11 @@ func TestDefaultsValidate(t *testing.T) {
 	if cfg.Store.Mode != StoreModeMemory {
 		t.Fatalf("memory store is the safe default")
 	}
+	// Retention is inert by default (ADR-0016): no horizon is configured,
+	// so an upgraded deployment never starts deleting outbox rows.
+	if cfg.Outbox.Retention.Active() {
+		t.Fatalf("retention horizons must default to zero/inert, got %+v", cfg.Outbox.Retention)
+	}
 }
 
 func TestLayeringFileThenEnv(t *testing.T) {
@@ -155,6 +160,9 @@ func TestValidationFailures(t *testing.T) {
 		func(c *Config) { c.Worker.BatchSize = 0 },
 		func(c *Config) { c.Worker.Concurrency = 65 },
 		func(c *Config) { c.Worker.MaxAttempts = 11 },
+		func(c *Config) { c.Outbox.Retention.BatchSize = 0 },
+		func(c *Config) { c.Outbox.Retention.Interval = Duration{} },
+		func(c *Config) { c.Outbox.Retention.DeliveredAfter = Duration{-1} },
 		// A heartbeat interval without margin inside the lease would expire
 		// live workers after two missed beats.
 		func(c *Config) {

@@ -43,6 +43,10 @@ type Metrics struct {
 	// outboxOperatorActions instruments the dead-letter operator surface
 	// (ADR-0015); labels are the fixed action and outcome vocabularies.
 	outboxOperatorActions *prometheus.CounterVec
+	// outboxRetentionDeleted instruments retention/GC rounds (ADR-0016);
+	// state is the fixed delivered/discarded vocabulary.
+	outboxRetentionDeleted *prometheus.CounterVec
+	outboxRetentionRounds  prometheus.Counter
 
 	workerClaimsAcquired prometheus.Counter
 	workerRunsFinished   *prometheus.CounterVec
@@ -129,6 +133,21 @@ func New() *Metrics {
 			},
 			[]string{"action", "outcome"},
 		),
+		outboxRetentionDeleted: prometheus.NewCounterVec(
+			prometheus.CounterOpts{
+				Namespace: namespace,
+				Name:      "outbox_retention_deleted_total",
+				Help:      "Terminal outbox rows deleted by retention sweeps, by state (delivered, discarded).",
+			},
+			[]string{"state"},
+		),
+		outboxRetentionRounds: prometheus.NewCounter(
+			prometheus.CounterOpts{
+				Namespace: namespace,
+				Name:      "outbox_retention_rounds_total",
+				Help:      "Retention sweep rounds that completed successfully, including rounds that deleted nothing.",
+			},
+		),
 		workerClaimsAcquired: prometheus.NewCounter(
 			prometheus.CounterOpts{
 				Namespace: namespace,
@@ -166,6 +185,8 @@ func New() *Metrics {
 		m.outboxRetryScheduled,
 		m.outboxDeadLettered,
 		m.outboxOperatorActions,
+		m.outboxRetentionDeleted,
+		m.outboxRetentionRounds,
 		m.workerClaimsAcquired,
 		m.workerRunsFinished,
 		m.workerRunsConverged,
@@ -240,3 +261,13 @@ func (m *Metrics) RunConverged(kind string) {
 func (m *Metrics) ActionRecorded(action, outcome string) {
 	m.outboxOperatorActions.WithLabelValues(action, outcome).Inc()
 }
+
+// Deleted records retention-sweep deletions for one fixed-vocabulary state
+// (outboxgc.Observer, ADR-0016).
+func (m *Metrics) Deleted(state string, n int64) {
+	m.outboxRetentionDeleted.WithLabelValues(state).Add(float64(n))
+}
+
+// RoundsCompleted records one successful retention sweep round
+// (outboxgc.Observer).
+func (m *Metrics) RoundsCompleted() { m.outboxRetentionRounds.Inc() }

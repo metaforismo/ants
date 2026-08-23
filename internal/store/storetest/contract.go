@@ -35,11 +35,14 @@ var (
 // World pairs a fresh empty store with its unit-of-work seam and a clock
 // advance hook; adapters must hand back views over the SAME underlying
 // state. Advance moves the adapter's scheduling clock (outbox leases,
-// backoff windows) so time-based behavior is deterministic in tests.
+// backoff windows) so time-based behavior is deterministic in tests. Clock
+// is that same authority; suites read it to assert reported instants are
+// store-owned rather than caller-supplied.
 type World struct {
 	Repos   ports.Repositories
 	Tx      ports.Transactor
 	Advance func(d time.Duration)
+	Clock   ports.Clock
 }
 
 // Factory constructs a fresh World per subtest.

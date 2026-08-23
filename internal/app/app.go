@@ -14,6 +14,7 @@ import (
 	"github.com/metaforismo/ants/internal/metrics"
 	"github.com/metaforismo/ants/internal/orchestration"
 	"github.com/metaforismo/ants/internal/outbox"
+	"github.com/metaforismo/ants/internal/outboxgc"
 	"github.com/metaforismo/ants/internal/outboxops"
 	"github.com/metaforismo/ants/internal/planner"
 	"github.com/metaforismo/ants/internal/policy"
@@ -43,6 +44,10 @@ type App struct {
 	// outbox commands run through it so every mutation commits its event,
 	// delivery, and audit record atomically.
 	OutboxOps *outboxops.Service
+	// Retention is the bounded outbox GC seam (ADR-0016); serve starts its
+	// scheduled loop only when a retention horizon is configured, and the
+	// CLI drives preview/manual rounds through it.
+	Retention *outboxgc.Service
 	// Metrics is the Prometheus collector behind /metrics and the observer
 	// of the outbox dispatcher and run worker; nil when metrics are disabled
 	// by configuration (ADR-0014).
@@ -210,6 +215,24 @@ func Build(cfg config.Config, logOut io.Writer) (*App, error) {
 		return nil, fmt.Errorf("app: wire outbox operator service: %w", oerr)
 	}
 
+	// Retention rounds share the collector through the same observer seam
+	// (ADR-0014 pattern); a nil observer when metrics are disabled changes
+	// outcomes not at all. The service is inert unless a retention horizon
+	// is configured (ADR-0016).
+	var gcObserver outboxgc.Observer
+	if collector != nil {
+		gcObserver = collector
+	}
+	retention, rerr := outboxgc.New(repos.Outbox, logger, outboxgc.Config{
+		DeliveredAfter: cfg.Outbox.Retention.DeliveredAfter.Duration,
+		DiscardedAfter: cfg.Outbox.Retention.DiscardedAfter.Duration,
+		BatchSize:      cfg.Outbox.Retention.BatchSize,
+		Interval:       cfg.Outbox.Retention.Interval.Duration,
+	}, gcObserver)
+	if rerr != nil {
+		return nil, fmt.Errorf("app: wire outbox retention service: %w", rerr)
+	}
+
 	return &App{
 		Config:    cfg,
 		Logger:    logger,
@@ -223,6 +246,7 @@ func Build(cfg config.Config, logOut io.Writer) (*App, error) {
 		Outbox:    dispatcher,
 		Worker:    runWorker,
 		OutboxOps: outboxOps,
+		Retention: retention,
 		Metrics:   collector,
 		Ready:     ready,
 	}, nil

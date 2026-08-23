@@ -20,6 +20,8 @@ var wantNames = []string{
 	"ants_outbox_messages_retry_scheduled_total",
 	"ants_outbox_messages_dead_lettered_total",
 	"ants_outbox_operator_actions_total",
+	"ants_outbox_retention_deleted_total",
+	"ants_outbox_retention_rounds_total",
 	"ants_worker_claims_acquired_total",
 	"ants_worker_runs_finished_total",
 	"ants_worker_runs_converged_total",
@@ -42,6 +44,9 @@ func TestRegistryExposesPromisedInstruments(t *testing.T) {
 	m.DeadLettered()
 	m.ActionRecorded("requeue", "succeeded")
 	m.ActionRecorded("discard", "stale_credential")
+	m.Deleted("delivered", 3)
+	m.Deleted("discarded", 1)
+	m.RoundsCompleted()
 	m.ClaimsAcquired(4)
 	m.RunFinished("completed")
 	m.RunConverged("exhausted")
@@ -71,6 +76,7 @@ func TestRegistryExposesPromisedInstruments(t *testing.T) {
 		"outcome=completed", "kind=exhausted",
 		"action=requeue", "outcome=succeeded",
 		"action=discard", "outcome=stale_credential",
+		"state=delivered",
 	} {
 		if !labels[want] {
 			t.Errorf("exposition missing label %q", want)

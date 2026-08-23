@@ -310,6 +310,89 @@ func afterKeyset(createdAt time.Time, id string, afterAt time.Time, afterID stri
 	return createdAt.Before(afterAt)
 }
 
+// SweepRetention deletes at most Limit terminal rows beyond their class
+// horizon (ADR-0016) — delivered victims claim the budget first, then
+// discarded victims, oldest-terminal-first within each class — under the
+// store's single write lock, the same atomicity PostgreSQL gets from its
+// unit of work. Eligibility is measured against this store's clock; NULL
+// terminal timestamps are never eligible. DryRun applies the identical
+// selection without mutating.
+func (r *OutboxRepository) SweepRetention(_ context.Context, req ports.RetentionSweepRequest) (ports.RetentionSweepResult, error) {
+	if err := req.Validate(); err != nil {
+		return ports.RetentionSweepResult{}, err
+	}
+	unlock := lockWrite(r.st)
+	defer unlock()
+	cutoff := r.st.clock.Now().UTC()
+	result := ports.RetentionSweepResult{Cutoff: cutoff}
+
+	// Budget allocation mirrors the PostgreSQL adapter: delivered victims
+	// first in (delivered_at, id) order, discarded with what remains.
+	budget := req.Limit
+	var victims []*outboxMessage
+	if req.DeliveredOlderThan > 0 {
+		eligible := selectRetentionVictims(r.st.outbox, domain.OutboxDelivered,
+			func(m *outboxMessage) *time.Time { return m.DeliveredAt }, cutoff, req.DeliveredOlderThan)
+		take := min(budget, len(eligible))
+		victims = append(victims, eligible[:take]...)
+		budget -= take
+		result.DeletedDelivered = int64(take)
+	}
+	if req.DiscardedOlderThan > 0 && budget > 0 {
+		eligible := selectRetentionVictims(r.st.outbox, domain.OutboxDiscarded,
+			func(m *outboxMessage) *time.Time { return m.DiscardedAt }, cutoff, req.DiscardedOlderThan)
+		if len(eligible) > budget {
+			eligible = eligible[:budget]
+		}
+		victims = append(victims, eligible...)
+	}
+	result.DeletedDiscarded = int64(len(victims)) - result.DeletedDelivered
+	if req.DryRun {
+		return result, nil
+	}
+
+	remove := make(map[*outboxMessage]struct{}, len(victims))
+	for _, m := range victims {
+		remove[m] = struct{}{}
+		delete(r.st.outboxByID, m.ID)
+		delete(r.st.outboxByDedup, m.DedupKey)
+	}
+	kept := r.st.outbox[:0:0]
+	for _, m := range r.st.outbox {
+		if _, dead := remove[m]; !dead {
+			kept = append(kept, m)
+		}
+	}
+	r.st.outbox = kept
+	return result, nil
+}
+
+// selectRetentionVictims returns the rows of one terminal status whose
+// terminal timestamp is non-NULL and at or before cutoff-horizon, ordered
+// oldest-terminal-first with the id tiebreak.
+func selectRetentionVictims(rows []*outboxMessage, status domain.OutboxDeliveryStatus, terminalAt func(*outboxMessage) *time.Time, cutoff time.Time, horizon time.Duration) []*outboxMessage {
+	eligibleAt := cutoff.Add(-horizon)
+	var victims []*outboxMessage
+	for _, m := range rows {
+		if m.Status != status {
+			continue
+		}
+		at := terminalAt(m)
+		if at == nil || at.After(eligibleAt) {
+			continue
+		}
+		victims = append(victims, m)
+	}
+	sort.Slice(victims, func(i, j int) bool {
+		a, b := *terminalAt(victims[i]), *terminalAt(victims[j])
+		if !a.Equal(b) {
+			return a.Before(b)
+		}
+		return victims[i].ID < victims[j].ID
+	})
+	return victims
+}
+
 func deadLetterSummary(m *outboxMessage) ports.DeadLetterSummary {
 	return ports.DeadLetterSummary{
 		ID:          m.ID,

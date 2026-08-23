@@ -45,6 +45,21 @@ outbox:
   lease: 30s
   max_attempts: 5
   retry_backoff_base: 500ms
+  retention:
+    # Bounded GC of terminal rows (ADR-0016). A horizon of zero exempts its
+    # class, so the defaults below are INERT: nothing is ever deleted until
+    # you set an explicit nonzero horizon. Eligible: delivered rows older
+    # than delivered_after, discarded rows (operator-triaged poison) older
+    # than discarded_after — give the latter a longer horizon. Pending,
+    # leased, and dead rows are never eligible; events and audit history are
+    # unreachable. Each round deletes at most batch_size rows — delivered
+    # victims first, oldest-terminal-first within each class; serve runs
+    # rounds every interval once any horizon is set, and
+    # `ants outbox retention preview|sweep --yes` drives them manually.
+    delivered_after: 0s
+    discarded_after: 0s
+    batch_size: 500
+    interval: 1h
 
 orchestrator:
   max_parallel_tasks: 4

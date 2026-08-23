@@ -5,6 +5,7 @@ coverage.out
 coverage.html
 
 # Local untracked state
+.local/
 *.local.yaml
 *.local.yml
 .env
