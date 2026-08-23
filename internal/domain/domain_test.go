@@ -27,12 +27,45 @@ func TestTransitionTablesAreInternallyConsistent(t *testing.T) {
 		{"workspace", func() error { return checkTransitionTable(AllWorkspaceStatuses, workspaceTransitions) }},
 		{"connection", func() error { return checkTransitionTable(AllConnectionStatuses, connectionTransitions) }},
 		{"run_claim", func() error { return checkTransitionTable(AllRunClaimStatuses, runClaimTransitions) }},
+		{"outbox_delivery", func() error { return checkTransitionTable(AllOutboxDeliveryStatuses, outboxDeliveryTransitions) }},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			if err := tt.check(); err != nil {
 				t.Fatalf("transition table inconsistent: %v", err)
 			}
 		})
+	}
+}
+
+func TestOutboxDeliveryStateMachine(t *testing.T) {
+	happy := []struct{ from, to OutboxDeliveryStatus }{
+		{OutboxPending, OutboxLeased},
+		{OutboxLeased, OutboxDelivered},
+		{OutboxLeased, OutboxPending},
+		{OutboxLeased, OutboxDead},
+		{OutboxDead, OutboxPending},   // operator requeue
+		{OutboxDead, OutboxDiscarded}, // operator discard
+	}
+	for _, c := range happy {
+		if !CanTransitionOutboxDelivery(c.from, c.to) {
+			t.Errorf("expected %s -> %s to be allowed", c.from, c.to)
+		}
+	}
+
+	illegal := []struct{ from, to OutboxDeliveryStatus }{
+		{OutboxPending, OutboxDelivered},
+		{OutboxPending, OutboxDead},
+		{OutboxDelivered, OutboxPending},
+		{OutboxDelivered, OutboxLeased},
+		{OutboxDiscarded, OutboxPending},
+		{OutboxDiscarded, OutboxDead},
+		{OutboxDead, OutboxDelivered},
+		{OutboxDead, OutboxLeased},
+	}
+	for _, c := range illegal {
+		if CanTransitionOutboxDelivery(c.from, c.to) {
+			t.Errorf("expected %s -> %s to be rejected", c.from, c.to)
+		}
 	}
 }
 

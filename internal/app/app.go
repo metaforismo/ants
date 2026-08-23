@@ -14,6 +14,7 @@ import (
 	"github.com/metaforismo/ants/internal/metrics"
 	"github.com/metaforismo/ants/internal/orchestration"
 	"github.com/metaforismo/ants/internal/outbox"
+	"github.com/metaforismo/ants/internal/outboxops"
 	"github.com/metaforismo/ants/internal/planner"
 	"github.com/metaforismo/ants/internal/policy"
 	"github.com/metaforismo/ants/internal/ports"
@@ -38,6 +39,10 @@ type App struct {
 	Seeder  orchestration.Seeder
 	Outbox  *outbox.Dispatcher
 	Worker  *worker.Worker
+	// OutboxOps is the dead-letter operator seam (ADR-0015); the CLI's
+	// outbox commands run through it so every mutation commits its event,
+	// delivery, and audit record atomically.
+	OutboxOps *outboxops.Service
 	// Metrics is the Prometheus collector behind /metrics and the observer
 	// of the outbox dispatcher and run worker; nil when metrics are disabled
 	// by configuration (ADR-0014).
@@ -185,20 +190,41 @@ func Build(cfg config.Config, logOut io.Writer) (*App, error) {
 		return nil, fmt.Errorf("app: wire run worker: %w", werr)
 	}
 
+	// Dead-letter operator actions share the collector through the same
+	// observer seam (ADR-0015); a nil observer when metrics are disabled
+	// changes outcomes not at all.
+	var opsObserver outboxops.Observer
+	if collector != nil {
+		opsObserver = collector
+	}
+	outboxOps, oerr := outboxops.New(outboxops.Deps{
+		Outbox:   repos.Outbox,
+		Events:   repos.Events,
+		Audit:    repos.Audit,
+		Tx:       transactor,
+		IDs:      ids,
+		Clock:    clock,
+		Observer: opsObserver,
+	})
+	if oerr != nil {
+		return nil, fmt.Errorf("app: wire outbox operator service: %w", oerr)
+	}
+
 	return &App{
-		Config:  cfg,
-		Logger:  logger,
-		Clock:   clock,
-		Repos:   repos,
-		Uow:     transactor,
-		Engine:  engine,
-		Sandbox: sandboxDriver,
-		SCM:     scmDriver,
-		Seeder:  seeder{},
-		Outbox:  dispatcher,
-		Worker:  runWorker,
-		Metrics: collector,
-		Ready:   ready,
+		Config:    cfg,
+		Logger:    logger,
+		Clock:     clock,
+		Repos:     repos,
+		Uow:       transactor,
+		Engine:    engine,
+		Sandbox:   sandboxDriver,
+		SCM:       scmDriver,
+		Seeder:    seeder{},
+		Outbox:    dispatcher,
+		Worker:    runWorker,
+		OutboxOps: outboxOps,
+		Metrics:   collector,
+		Ready:     ready,
 	}, nil
 }
 

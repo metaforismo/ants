@@ -143,6 +143,7 @@ type OutboxStats struct {
 	Leased    int64
 	Delivered int64
 	Dead      int64
+	Discarded int64
 }
 
 // OutboxStore is the durable work/event queue behind the transactional
@@ -166,4 +167,16 @@ type OutboxStore interface {
 	// dead-letters the message.
 	FailWithBackoff(ctx context.Context, id, leasedBy string, retryIn time.Duration, cause string) error
 	Stats(ctx context.Context) (OutboxStats, error)
+
+	// Operator surface for dead letters (ADR-0015). Mutations are valid only
+	// from the dead state and require the expected generation as a
+	// compare-and-swap credential: stale credentials conflict, wrong state is
+	// an invalid transition, unknown and foreign-tenant messages are uniform
+	// not-found. Callers composing these with event and audit writes must do
+	// so inside one unit of work so an operator action can never land without
+	// its trail.
+	ListDeadLetters(ctx context.Context, req ListDeadLettersRequest) ([]DeadLetterSummary, error)
+	GetDeadLetter(ctx context.Context, tenantID domain.TenantID, messageID string) (*DeadLetterSummary, error)
+	RequeueDeadLetter(ctx context.Context, req OutboxMutationRequest) (OutboxMutationResult, error)
+	DiscardDeadLetter(ctx context.Context, req OutboxMutationRequest) (OutboxMutationResult, error)
 }

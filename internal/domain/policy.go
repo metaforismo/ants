@@ -36,6 +36,8 @@ const (
 	ActionSecretRead          PolicyAction = "secret.read"
 	ActionHostMutation        PolicyAction = "host.mutate_outside_workspace"
 	ActionGlobalInstall       PolicyAction = "package.install_global"
+	ActionOutboxRequeue       PolicyAction = "operator.outbox.requeue_dead_letter"
+	ActionOutboxDiscard       PolicyAction = "operator.outbox.discard_dead_letter"
 )
 
 var AllPolicyActions = []PolicyAction{
@@ -48,6 +50,8 @@ var AllPolicyActions = []PolicyAction{
 	ActionSecretRead,
 	ActionHostMutation,
 	ActionGlobalInstall,
+	ActionOutboxRequeue,
+	ActionOutboxDiscard,
 }
 
 // PolicyRequest is the normalized input to the decision function.

@@ -1,6 +1,8 @@
 package memory
 
 import (
+	"fmt"
+
 	"github.com/metaforismo/ants/internal/domain"
 )
 
@@ -60,12 +62,35 @@ func (st *storeState) backup() *stateBackup {
 		runClaims:     make(map[domain.RunID]*domain.RunClaim, len(st.runClaims)),
 		eventSeq:      st.eventSeq,
 	}
-	copy(b.outbox, st.outbox)
+	// One clone per stored row keeps the three outbox views pointer-aligned
+	// across backup AND restore: lifecycle operations mutate rows in place
+	// through whichever index reaches them first (Lease walks the slice,
+	// operator mutations resolve via outboxByID), so independently cloned
+	// containers would fork each row and let a post-restore write update only
+	// one view while Stats/List observe another. Restore preserves the
+	// alignment because it installs these same pointers into fresh
+	// containers. Every indexed row lives in the canonical slice (Publish
+	// maintains the trio together and nothing removes rows), so a miss below
+	// is unrecoverable store corruption rather than a clonable state.
+	cloneOf := make(map[*outboxMessage]*outboxMessage, len(st.outbox))
+	for i, m := range st.outbox {
+		c := cloneOutboxMessage(m)
+		cloneOf[m] = c
+		b.outbox[i] = c
+	}
 	for k, v := range st.outboxByID {
-		b.outboxByID[k] = v
+		c, ok := cloneOf[v]
+		if !ok {
+			panic(fmt.Sprintf("memory: outbox index entry %q references a row outside the canonical slice", k))
+		}
+		b.outboxByID[k] = c
 	}
 	for k, v := range st.outboxByDedup {
-		b.outboxByDedup[k] = v
+		c, ok := cloneOf[v]
+		if !ok {
+			panic(fmt.Sprintf("memory: outbox dedup entry %q references a row outside the canonical slice", k))
+		}
+		b.outboxByDedup[k] = c
 	}
 	for k, v := range st.runClaims {
 		b.runClaims[k] = cloneRunClaim(v)
@@ -235,6 +260,34 @@ func cloneMessageSlice(in []*domain.Message) []*domain.Message {
 	out := make([]*domain.Message, len(in))
 	copy(out, in)
 	return out
+}
+
+// cloneOutboxMessage deep-copies one stored row including its byte slice and
+// timestamp pointers so in-place lifecycle writes during a unit of work can
+// never reach the backup.
+func cloneOutboxMessage(m *outboxMessage) *outboxMessage {
+	if m == nil {
+		return nil
+	}
+	c := *m
+	c.Envelope = append([]byte(nil), m.Envelope...)
+	if m.LeaseUntil != nil {
+		t := *m.LeaseUntil
+		c.LeaseUntil = &t
+	}
+	if m.DeliveredAt != nil {
+		t := *m.DeliveredAt
+		c.DeliveredAt = &t
+	}
+	if m.DeadAt != nil {
+		t := *m.DeadAt
+		c.DeadAt = &t
+	}
+	if m.DiscardedAt != nil {
+		t := *m.DiscardedAt
+		c.DiscardedAt = &t
+	}
+	return &c
 }
 
 func clonePolicyDecisions(in []*domain.PolicyDecision) []*domain.PolicyDecision {

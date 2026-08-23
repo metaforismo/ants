@@ -19,6 +19,7 @@ var wantNames = []string{
 	"ants_outbox_messages_delivered_total",
 	"ants_outbox_messages_retry_scheduled_total",
 	"ants_outbox_messages_dead_lettered_total",
+	"ants_outbox_operator_actions_total",
 	"ants_worker_claims_acquired_total",
 	"ants_worker_runs_finished_total",
 	"ants_worker_runs_converged_total",
@@ -35,10 +36,12 @@ func TestRegistryExposesPromisedInstruments(t *testing.T) {
 	m.HTTPInFlightDec()
 	m.HTTPObserveRequest("POST", "/v1/tenants", 201, 12*time.Millisecond)
 	m.RoundLeased(3)
-	m.OutboxStates(ports.OutboxStats{Pending: 1, Leased: 2, Delivered: 5, Dead: 7})
+	m.OutboxStates(ports.OutboxStats{Pending: 1, Leased: 2, Delivered: 5, Dead: 7, Discarded: 11})
 	m.Delivered()
 	m.RetryScheduled()
 	m.DeadLettered()
+	m.ActionRecorded("requeue", "succeeded")
+	m.ActionRecorded("discard", "stale_credential")
 	m.ClaimsAcquired(4)
 	m.RunFinished("completed")
 	m.RunConverged("exhausted")
@@ -64,8 +67,10 @@ func TestRegistryExposesPromisedInstruments(t *testing.T) {
 	}
 	for _, want := range []string{
 		"method=POST", "route=/v1/tenants", "status=201",
-		"state=pending", "state=dead",
+		"state=pending", "state=dead", "state=discarded",
 		"outcome=completed", "kind=exhausted",
+		"action=requeue", "outcome=succeeded",
+		"action=discard", "outcome=stale_credential",
 	} {
 		if !labels[want] {
 			t.Errorf("exposition missing label %q", want)

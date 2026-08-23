@@ -29,9 +29,13 @@ networks.
 - Dev header authentication is confined to loopback binds at startup
   (ADR-0013) and must never be enabled outside local development; full OIDC
   replaces it in a later horizon.
-- The outbox dispatcher is single-process; multi-node delivery scale-out,
-  dead-letter requeue/discard tooling, and outbox retention are deferred
-  (ADR-0011, ADR-0013).
+- The outbox dispatcher is single-process; multi-node delivery scale-out and
+  outbox retention/GC are deferred (ADR-0011, ADR-0013, ADR-0015).
+- Dead-letter requeue/discard runs through the local CLI over the store seam:
+  whoever can run it holds database privileges, the same trust level as
+  `migrate up`. Every mutation is fenced by a compare-and-swap generation and
+  committed with its event and audit record atomically; remote operator APIs
+  wait for real authenticated principals (ADR-0015).
 - `/metrics` is unauthenticated by design like the health probes and serves
   aggregate operational series only (fixed-vocabulary labels; no tenant,
   resource, or principal identifiers). Deployments that must not expose it
