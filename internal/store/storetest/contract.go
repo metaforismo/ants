@@ -306,19 +306,31 @@ func testThreadListScopesAndOrders(t *testing.T, repos ports.Repositories) {
 	second := seedThreadAt(ctx, t, repos, tenantID, project.ID, "second thread", fixedTime(20))
 	seedThreadAt(ctx, t, repos, otherID, foreignProject.ID, "foreign thread", fixedTime(30))
 
+	// Equal updated_at must still yield one deterministic order on every
+	// store implementation: ties resolve by ascending id.
+	tieB := seedThreadAt(ctx, t, repos, tenantID, project.ID, "tie b", fixedTime(40))
+	tieA := seedThreadAt(ctx, t, repos, tenantID, project.ID, "tie a", fixedTime(40))
+
 	list, err := repos.Threads.ListByTenant(ctx, tenantID, 0)
 	if err != nil {
 		t.Fatalf("list: %v", err)
 	}
-	if len(list) != 2 {
+	if len(list) != 4 {
 		t.Fatalf("tenant list must contain exactly its own threads, got %d: %+v", len(list), list)
 	}
-	if list[0].ID != second.ID || list[1].ID != first.ID {
-		t.Fatalf("list must order most recently updated first: %s then %s", list[0].ID, list[1].ID)
+	tieFirst, tieSecond := tieA.ID, tieB.ID
+	if tieSecond < tieFirst {
+		tieFirst, tieSecond = tieSecond, tieFirst
+	}
+	wantOrder := []domain.ThreadID{tieFirst, tieSecond, second.ID, first.ID}
+	for i, want := range wantOrder {
+		if list[i].ID != want {
+			t.Fatalf("list position %d = %s, want %s (updated desc, id asc)", i, list[i].ID, want)
+		}
 	}
 
 	bounded, err := repos.Threads.ListByTenant(ctx, tenantID, 1)
-	if err != nil || len(bounded) != 1 || bounded[0].ID != second.ID {
+	if err != nil || len(bounded) != 1 || bounded[0].ID != tieFirst {
 		t.Fatalf("limit must keep the newest entries: %+v %v", bounded, err)
 	}
 

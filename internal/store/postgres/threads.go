@@ -55,9 +55,10 @@ func (r *ThreadRepository) Get(ctx context.Context, tenantID domain.TenantID, id
 // ListByTenant returns the tenant's threads, most recently updated first.
 // The tenant predicate is structural: foreign rows can never appear, and a
 // query error surfaces as transient rather than being flattened into an
-// empty page.
+// empty page. Ties on updated_at resolve by ascending id so both store
+// implementations of this port return the same order for the same rows.
 func (r *ThreadRepository) ListByTenant(ctx context.Context, tenantID domain.TenantID, limit int) ([]*domain.Thread, error) {
-	query := `SELECT ` + threadColumns + ` FROM threads WHERE tenant_id = $1 ORDER BY updated_at DESC`
+	query := `SELECT ` + threadColumns + ` FROM threads WHERE tenant_id = $1 ORDER BY updated_at DESC, id ASC`
 	args := []any{string(tenantID)}
 	if limit > 0 {
 		query += ` LIMIT $2`
