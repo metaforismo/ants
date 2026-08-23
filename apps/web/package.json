@@ -1,0 +1,37 @@
+{
+  "name": "@ants/web",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Ants web console: Next.js App Router client operating against the /v1 API through a server-side BFF. No token ever reaches browser JavaScript.",
+  "type": "module",
+  "scripts": {
+    "dev": "next dev -p 3100",
+    "build": "next build",
+    "start": "next start -p 3100",
+    "typecheck": "tsc --noEmit",
+    "lint": "eslint src e2e tests",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "@ants/contracts": "workspace:*",
+    "@tanstack/react-query": "5.102.0",
+    "next": "16.3.2",
+    "openid-client": "6.8.7",
+    "react": "19.2.8",
+    "react-dom": "19.2.8"
+  },
+  "devDependencies": {
+    "@playwright/test": "1.62.1",
+    "@testing-library/react": "16.3.2",
+    "@types/node": "25.9.5",
+    "@types/react": "19.2.18",
+    "@types/react-dom": "19.2.4",
+    "@vitejs/plugin-react": "6.1.0",
+    "eslint": "10.9.0",
+    "eslint-plugin-react-hooks": "7.1.1",
+    "jsdom": "30.0.1",
+    "typescript": "5.9.3",
+    "typescript-eslint": "8.67.0",
+    "vitest": "4.1.11"
+  }
+}
