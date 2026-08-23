@@ -47,6 +47,10 @@ type ThreadStore interface {
 	Create(ctx context.Context, thread *domain.Thread) error
 	Get(ctx context.Context, tenantID domain.TenantID, id domain.ThreadID) (*domain.Thread, error)
 	Update(ctx context.Context, thread *domain.Thread, expectedVersion int64) error
+	// ListByTenant returns up to limit threads owned by the tenant, most
+	// recently updated first. Foreign-tenant rows are indistinguishable from
+	// absent ones (ADR-0004): a tenant's list simply never contains them.
+	ListByTenant(ctx context.Context, tenantID domain.TenantID, limit int) ([]*domain.Thread, error)
 	AppendMessage(ctx context.Context, message *domain.Message) error
 	Messages(ctx context.Context, tenantID domain.TenantID, threadID domain.ThreadID, afterSeq int64, limit int) ([]*domain.Message, int64, error)
 }

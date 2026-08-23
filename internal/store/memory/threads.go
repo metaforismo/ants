@@ -2,6 +2,7 @@ package memory
 
 import (
 	"context"
+	"sort"
 
 	"github.com/metaforismo/ants/internal/domain"
 )
@@ -81,6 +82,28 @@ func (r *ThreadRepository) Messages(_ context.Context, tenantID domain.TenantID,
 		}
 	}
 	return out, totalSeq, nil
+}
+
+func (r *ThreadRepository) ListByTenant(_ context.Context, tenantID domain.TenantID, limit int) ([]*domain.Thread, error) {
+	unlock := lockRead(r.st)
+	defer unlock()
+	out := make([]*domain.Thread, 0, len(r.st.threads))
+	for _, t := range r.st.threads {
+		if t.TenantID != tenantID {
+			continue
+		}
+		out = append(out, cloneThread(t))
+	}
+	sort.Slice(out, func(i, j int) bool {
+		if !out[i].UpdatedAt.Equal(out[j].UpdatedAt) {
+			return out[i].UpdatedAt.After(out[j].UpdatedAt)
+		}
+		return out[i].ID < out[j].ID
+	})
+	if limit > 0 && len(out) > limit {
+		out = out[:limit]
+	}
+	return out, nil
 }
 
 type SpecRepository struct{ st *storeState }

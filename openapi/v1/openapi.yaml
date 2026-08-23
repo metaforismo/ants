@@ -147,6 +147,22 @@ paths:
           $ref: "#/components/responses/Problem"
 
   /v1/threads:
+    get:
+      tags: [threads]
+      summary: List threads of the authenticated tenant
+      operationId: listThreads
+      security: [{ bearerAuth: [] }]
+      responses:
+        "200":
+          description: |
+            Threads ordered by most recent update, bounded to a
+            server-defined page size.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ThreadList"
+        "401":
+          $ref: "#/components/responses/Problem"
     post:
       tags: [threads]
       summary: Open a thread on a project
@@ -598,6 +614,14 @@ components:
         version: { type: integer, format: int64 }
         created_at: { $ref: "#/components/schemas/Timestamp" }
         updated_at: { $ref: "#/components/schemas/Timestamp" }
+
+    ThreadList:
+      type: object
+      required: [threads]
+      properties:
+        threads:
+          type: array
+          items: { $ref: "#/components/schemas/Thread" }
 
     CreateThreadRequest:
       type: object

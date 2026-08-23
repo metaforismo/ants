@@ -14,6 +14,7 @@ var _ interface {
 	Create(context.Context, *domain.Thread) error
 	Get(context.Context, domain.TenantID, domain.ThreadID) (*domain.Thread, error)
 	Update(context.Context, *domain.Thread, int64) error
+	ListByTenant(context.Context, domain.TenantID, int) ([]*domain.Thread, error)
 	AppendMessage(context.Context, *domain.Message) error
 	Messages(context.Context, domain.TenantID, domain.ThreadID, int64, int) ([]*domain.Message, int64, error)
 } = (*ThreadRepository)(nil)
@@ -49,6 +50,37 @@ func (r *ThreadRepository) Get(ctx context.Context, tenantID domain.TenantID, id
 	return scanThread(r.st.q(ctx).QueryRowContext(ctx,
 		`SELECT `+threadColumns+` FROM threads WHERE id = $1 AND tenant_id = $2`,
 		string(id), string(tenantID)))
+}
+
+// ListByTenant returns the tenant's threads, most recently updated first.
+// The tenant predicate is structural: foreign rows can never appear, and a
+// query error surfaces as transient rather than being flattened into an
+// empty page.
+func (r *ThreadRepository) ListByTenant(ctx context.Context, tenantID domain.TenantID, limit int) ([]*domain.Thread, error) {
+	query := `SELECT ` + threadColumns + ` FROM threads WHERE tenant_id = $1 ORDER BY updated_at DESC`
+	args := []any{string(tenantID)}
+	if limit > 0 {
+		query += ` LIMIT $2`
+		args = append(args, limit)
+	}
+	rows, err := r.st.q(ctx).QueryContext(ctx, query, args...)
+	if err != nil {
+		return nil, wrapScan(err)
+	}
+	defer rows.Close()
+	out := []*domain.Thread{}
+	for rows.Next() {
+		var t domain.Thread
+		if err := rows.Scan(&t.ID, &t.TenantID, &t.ProjectID, &t.Title, &t.Status, &t.CreatorID,
+			&t.Version, &t.CreatedAt, &t.UpdatedAt); err != nil {
+			return nil, wrapScan(err)
+		}
+		out = append(out, &t)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, wrapScan(err)
+	}
+	return out, nil
 }
 
 // Update applies an optimistic-concurrency state change: the write only lands

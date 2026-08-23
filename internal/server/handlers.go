@@ -144,6 +144,22 @@ func (s *Server) handleCreateThread(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusCreated, thread)
 }
 
+// handleListThreads serves the tenant's most recently updated threads. The
+// page is bounded server-side; the web client renders it as one list and
+// re-fetches, so no cursor contract is exposed yet.
+func (s *Server) handleListThreads(w http.ResponseWriter, r *http.Request) {
+	p := mustPrincipal(w, r)
+	if p == nil {
+		return
+	}
+	threads, err := s.repos.Threads.ListByTenant(r.Context(), p.TenantID, defaultPageLimit)
+	if err != nil {
+		writeProblem(w, r, asDomainError(err))
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"threads": threads})
+}
+
 func (s *Server) handleGetThread(w http.ResponseWriter, r *http.Request) {
 	p := mustPrincipal(w, r)
 	if p == nil {
