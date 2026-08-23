@@ -32,6 +32,8 @@ func runOutbox(args []string, stdout, stderr io.Writer) int {
 	switch args[0] {
 	case "dead-letter":
 		return runDeadLetter(args[1:], stdout, stderr)
+	case "retention":
+		return runOutboxRetention(args[1:], stdout, stderr)
 	default:
 		fmt.Fprintf(stderr, "unknown outbox command %q\n\n", args[0])
 		outboxUsage(stderr)
@@ -40,18 +42,22 @@ func runOutbox(args []string, stdout, stderr io.Writer) int {
 }
 
 func outboxUsage(w io.Writer) {
-	fmt.Fprint(w, `ants outbox - dead-letter operations
+	fmt.Fprint(w, `ants outbox - dead-letter operations and retention
 
 Usage:
   ants outbox dead-letter list  --tenant <id> [--limit N] [--after TOKEN] [--json]
   ants outbox dead-letter show  --tenant <id> <message-id> [--json]
   ants outbox dead-letter requeue --tenant <id> --actor <id> <message-id> [--reason R] [--trace-id T]
   ants outbox dead-letter discard --tenant <id> --actor <id> --yes <message-id> [--reason R] [--trace-id T]
+  ants outbox retention preview [--json]
+  ants outbox retention sweep --yes [--json]
 
 Requeue restarts a fresh bounded delivery lifecycle. Discard is terminal and
 retains the row as history; it refuses to run without --yes. Mutations are
 compare-and-swap guarded: a conflict names the newer generation to read via
-show before acting again.
+show before acting again. Retention sweeps delete only delivered/discarded
+rows beyond their configured horizons (ADR-0016); sweep refuses to run
+without --yes and preview never deletes anything.
 `)
 }
 
@@ -421,4 +427,109 @@ func decodeCursor(token string) (time.Time, string, error) {
 		return time.Time{}, "", domain.Invalidf("outbox_page_cursor", "pagination cursor %q is not valid", token)
 	}
 	return c.At, c.ID, nil
+}
+
+// Retention commands (ADR-0016): preview reports what a bounded round would
+// collect right now without deleting anything; sweep performs the deletion
+// and requires --yes because it is destructive. Both run the SAME selection
+// logic (the sweep's dry-run mode), so a preview can never drift from what
+// the sweep would do. Without --yes, sweep prints exactly that preview and
+// exits with usage status — there is no interactive prompt, so automation
+// can never hang on this command.
+func runOutboxRetention(args []string, stdout, stderr io.Writer) int {
+	if len(args) == 0 || args[0] == "-h" || args[0] == "--help" {
+		retentionUsage(stdout)
+		return exitOK
+	}
+	switch args[0] {
+	case "preview":
+		return runRetentionSweep(args[1:], stdout, stderr, false)
+	case "sweep":
+		return runRetentionSweep(args[1:], stdout, stderr, true)
+	default:
+		fmt.Fprintf(stderr, "unknown retention command %q\n", args[0])
+		retentionUsage(stderr)
+		return exitUsage
+	}
+}
+
+func retentionUsage(w io.Writer) {
+	fmt.Fprint(w, `ants outbox retention - bounded garbage collection of terminal rows
+
+Usage:
+  ants outbox retention preview [--config <path>] [--json]
+  ants outbox retention sweep --yes [--config <path>] [--json]
+
+Only delivered/discarded rows older than their configured horizons
+(outbox.retention.*) are eligible; pending, leased, dead rows, events, and
+audit history are never touched. With both horizons unset (the default),
+retention is inert: preview always reports zero and sweep --yes deletes
+nothing.
+`)
+}
+
+func runRetentionSweep(args []string, stdout, stderr io.Writer, destructive bool) int {
+	name := "outbox retention " + map[bool]string{true: "sweep", false: "preview"}[destructive]
+	fs := flag.NewFlagSet(name, flag.ContinueOnError)
+	var cf commonFlags
+	addCommonFlags(fs, &cf)
+	confirmed := fs.Bool("yes", false, "confirm destructive deletion (sweep only, required)")
+	fs.SetOutput(stderr)
+	flagArgs, _ := reorderPositionalsLast(fs, args)
+	if err := fs.Parse(flagArgs); err != nil {
+		return exitUsage
+	}
+	application, code := buildWorld(stderr, cf.configPath)
+	if application == nil {
+		return code
+	}
+
+	// Destructive sweeps are gated before any mutation: the refusal carries
+	// the real preview numbers computed by the non-destructive path, so an
+	// unconfirmed command deletes nothing while showing exactly what it
+	// would have done.
+	if destructive && !*confirmed {
+		res, perr := application.Retention.Preview(context.Background())
+		if perr != nil {
+			printTypedError(stderr, perr)
+			return exitFailure
+		}
+		fmt.Fprintf(stderr,
+			"refusing to sweep: %d delivered and %d discarded rows (cutoff %s) would be deleted.\n"+
+				"Deletion is permanent and bounded by outbox.retention.* configuration.\n"+
+				"Re-run with --yes to confirm.\n",
+			res.DeletedDelivered, res.DeletedDiscarded, res.Cutoff.UTC().Format(time.RFC3339))
+		return exitUsage
+	}
+	return retentionSweep(application, destructive, cf.json, stdout, stderr)
+}
+
+// retentionSweep is the execution core: previews report without deleting,
+// sweeps perform one bounded round.
+func retentionSweep(application *app.App, delete bool, asJSON bool, stdout, stderr io.Writer) int {
+	ctx := context.Background()
+	var (
+		res ports.RetentionSweepResult
+		err error
+	)
+	if delete {
+		res, err = application.Retention.Round(ctx)
+	} else {
+		res, err = application.Retention.Preview(ctx)
+	}
+	if err != nil {
+		printTypedError(stderr, err)
+		return exitFailure
+	}
+	if asJSON {
+		if err := json.NewEncoder(stdout).Encode(res); err != nil {
+			printTypedError(stderr, err)
+			return exitFailure
+		}
+		return exitOK
+	}
+	verb := map[bool]string{true: "swept", false: "preview"}[delete]
+	fmt.Fprintf(stdout, "retention %s delivered=%d discarded=%d cutoff=%s\n",
+		verb, res.DeletedDelivered, res.DeletedDiscarded, res.Cutoff.UTC().Format(time.RFC3339))
+	return exitOK
 }
