@@ -303,6 +303,101 @@ func (r *OutboxRepository) DiscardDeadLetter(ctx context.Context, req ports.Outb
 	return result, err
 }
 
+// SweepRetention deletes at most Limit terminal rows beyond their class
+// horizon (ADR-0016), oldest-terminal-first. The whole round is one unit of
+// work: it joins the caller's transaction when present, so a rolled-back
+// unit restores deleted rows exactly like the memory adapter's snapshot.
+// Each class deletion selects its victims with FOR UPDATE SKIP LOCKED so
+// concurrent sweeps, dispatchers, and operator mutations can neither collide
+// nor observe a half-deleted round. A non-positive horizon exempts its class.
+func (r *OutboxRepository) SweepRetention(ctx context.Context, req ports.RetentionSweepRequest) (ports.RetentionSweepResult, error) {
+	if err := req.Validate(); err != nil {
+		return ports.RetentionSweepResult{}, err
+	}
+	var result ports.RetentionSweepResult
+	err := r.st.Do(ctx, func(ctx context.Context) error {
+		cutoff := r.st.now()
+		result = ports.RetentionSweepResult{Cutoff: cutoff}
+
+		if req.DryRun {
+			var err error
+			result.DeletedDelivered, err = countRetainable(ctx, r.st.q(ctx),
+				"delivered", "delivered_at", cutoff.Add(-req.DeliveredOlderThan))
+			if err != nil {
+				return err
+			}
+			result.DeletedDiscarded, err = countRetainable(ctx, r.st.q(ctx),
+				"discarded", "discarded_at", cutoff.Add(-req.DiscardedOlderThan))
+			return err
+		}
+
+		budget := req.Limit
+		deletedDelivered := int64(0)
+		if req.DeliveredOlderThan > 0 {
+			n, derr := deleteRetainableBatch(ctx, r.st.q(ctx),
+				"delivered", "delivered_at", cutoff.Add(-req.DeliveredOlderThan), budget)
+			if derr != nil {
+				return derr
+			}
+			deletedDelivered = n
+			budget -= int(n)
+		}
+		deletedDiscarded := int64(0)
+		if req.DiscardedOlderThan > 0 && budget > 0 {
+			n, derr := deleteRetainableBatch(ctx, r.st.q(ctx),
+				"discarded", "discarded_at", cutoff.Add(-req.DiscardedOlderThan), budget)
+			if derr != nil {
+				return derr
+			}
+			deletedDiscarded = n
+		}
+		result.DeletedDelivered = deletedDelivered
+		result.DeletedDiscarded = deletedDiscarded
+		return nil
+	})
+	return result, err
+}
+
+// The status/column literal pairs passed to countRetainable and
+// deleteRetainableBatch live only at the two call sites above; request data
+// is always parameterized.
+
+func countRetainable(ctx context.Context, q executor, status, column string, eligibleBefore time.Time) (int64, error) {
+	var n int64
+	err := q.QueryRowContext(ctx,
+		`SELECT COUNT(*) FROM outbox WHERE status = $1 AND `+column+` IS NOT NULL AND `+column+` <= $2`,
+		status, eligibleBefore).Scan(&n)
+	if err != nil {
+		return 0, wrapScan(err)
+	}
+	return n, nil
+}
+
+// deleteRetainableBatch removes at most limit rows of one terminal class,
+// oldest-terminal-first, returning the truthful deleted count via RETURNING.
+func deleteRetainableBatch(ctx context.Context, q executor, status, column string, eligibleBefore time.Time, limit int) (int64, error) {
+	rows, err := q.QueryContext(ctx,
+		`DELETE FROM outbox
+		 WHERE id IN (
+		   SELECT id FROM outbox
+		   WHERE status = $1 AND `+column+` IS NOT NULL AND `+column+` <= $2
+		   ORDER BY `+column+`, id
+		   LIMIT $3
+		   FOR UPDATE SKIP LOCKED
+		 )
+		 RETURNING 1`,
+		status, eligibleBefore, limit)
+	if err != nil {
+		return 0, wrapWrite(err)
+	}
+	defer rows.Close()
+	var deleted int64
+	for rows.Next() {
+		deleted++
+	}
+	return deleted, rows.Err()
+}
+
 // operatorTargetState is the minimal read-back classification needs.
 type operatorTargetState struct {
 	status     domain.OutboxDeliveryStatus
