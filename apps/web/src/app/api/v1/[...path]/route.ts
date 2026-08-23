@@ -1,6 +1,7 @@
 import { NextResponse } from "next/server";
 
 import { getWebConfig } from "@/lib/config";
+import { safeProxySegments } from "@/lib/proxy-path";
 import type { Problem } from "@/lib/problem";
 import { isSameOrigin } from "@/lib/origin";
 import { REQUEST_ID_HEADER, resolveRequestId } from "@/lib/requestid";
@@ -64,8 +65,21 @@ async function handle(request: Request, context: RouteContext): Promise<Response
     });
   }
 
-  // Re-encode every segment so a crafted path can never walk off /v1/*.
-  const subpath = (path ?? []).map(encodeURIComponent).join("/");
+  // Containment is structural: dot segments (decoded by the framework before
+  // handlers run) are refused outright, and every accepted segment is then
+  // re-encoded so a crafted path can never walk off /v1/*. A refusal renders
+  // as the same 404 problem shape the API itself returns, preserving the
+  // uniform no-oracle vocabulary.
+  const segments = safeProxySegments(path);
+  if (!segments) {
+    return problemResponse(404, {
+      type: "about:blank",
+      code: "not_found",
+      title: "Not Found",
+      status: 404,
+    });
+  }
+  const subpath = segments.map(encodeURIComponent).join("/");
   const target = new URL(`/v1/${subpath}${new URL(request.url).search}`, cfg.apiBaseUrl);
 
   // Correlation: accept a grammar-valid browser id, otherwise mint one; the
