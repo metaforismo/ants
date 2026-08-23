@@ -48,13 +48,16 @@ networks.
   reach a log line, event envelope, or audit payload. Work outside a request
   carries no correlation at all rather than a fabricated identity.
 - The web console keeps credentials out of the browser entirely (ADR-0020):
-  access/refresh/ID tokens exist only inside an AES-256-GCM-sealed `HttpOnly`
-  cookie and server memory; no token has a code path into client JavaScript,
-  storage, or URLs (the session probe returns identity metadata only).
-   Mutating BFF routes require same-origin (`Origin` must equal the
-   validated public origin; the request's own `Host` header is never
-   trusted as an acceptance criterion, so a DNS-rebinding pair of forged
-   headers cannot pass) on top of `SameSite=Lax`
+  access and refresh tokens exist only inside an AES-256-GCM-sealed
+  `HttpOnly` cookie and server memory; the ID token is validated during the
+  OIDC callback (issuer, audience, nonce via the OIDC library) and
+  deliberately not persisted, keeping the sealed session inside the
+  browser's ~4 KiB per-cookie budget; no token has a code path into client
+  JavaScript, storage, or URLs (the session probe returns identity metadata
+  only). Mutating BFF routes require same-origin (`Origin` must equal the
+  validated public origin; the request's own `Host` header is never
+  trusted as an acceptance criterion, so a DNS-rebinding pair of forged
+  headers cannot pass) on top of `SameSite=Lax`
   cookies; post-login redirects accept relative in-app paths only; login
   binds `state`, PKCE S256 verifier, and `nonce` in a single-use sealed
   transaction cleared before exchange; refresh renewals are serialized so

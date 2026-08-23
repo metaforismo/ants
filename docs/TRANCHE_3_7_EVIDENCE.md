@@ -294,14 +294,16 @@ contracts/web-typecheck/lint/test/build), fresh web suite 52 tests / 8 files
 including the new proxy-path and origin-regression rows. Docker-backed
 suites remain BLOCKED for the reasons recorded above.
 
-**Audit-owned process cleanup (coordinator action required):** the loopback
+**Audit-owned process cleanup (resolved by the coordinator):** the loopback
 probe fixtures this audit started SURVIVED the OpenCode session that created
 them — the machine sandbox denies `kill`/`ps`, so the auditor could neither
-enumerate nor signal them despite repeated attempts. A coordinator with
-process privileges should reap any remaining listeners bound to 127.0.0.1 on
-ports 3199, 3201, 3203 (Next.js dev builds) and 18099, 18101 (ants-api
-memory-store instances); all are loopback-only fixtures serving no external
-interface, started from `.local/audit/`.
+enumerate nor signal them despite repeated attempts. The audit left six
+listeners bound to 127.0.0.1: web ports 3199, 3201, 3203, 3205 (Next.js dev
+builds) and API ports 18099, 18101 (ants-api memory-store instances); all
+were loopback-only fixtures serving no external interface, started from
+`.local/audit/`. The coordinator resolved each exact PID and reaped all six;
+a post-reap read-only `lsof` sweep of those six ports found no listeners
+remaining.
 
 ## Prompt for PR 3.8 (next tranche)
 

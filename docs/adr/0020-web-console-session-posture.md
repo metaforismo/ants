@@ -36,12 +36,14 @@ Actors this design defends against:
    `redirect_uri`. Logout — the one route a top-level cross-site form could
    reach — applies the same check.
 2. **XSS attempting credential theft** — there is nothing to steal from
-   client JavaScript: access/refresh/ID tokens live only inside an
-   `HttpOnly` sealed cookie and server memory for the duration of a request.
-   No token ever enters `localStorage`, `sessionStorage`, a URL, or a
-   client-visible response (the session probe returns identity metadata
-   only). Defense-in-depth stays with React auto-escaping and a strict
-   CSP-free surface of zero third-party scripts.
+   client JavaScript: access and refresh tokens live only inside an
+   `HttpOnly` sealed cookie and server memory for the duration of a request,
+   while the ID token is validated at the callback and deliberately not
+   persisted — the sealed-cookie budget decides what is stored (see the
+   logout decision below). No token ever enters `localStorage`,
+   `sessionStorage`, a URL, or a client-visible response (the session probe
+   returns identity metadata only). Defense-in-depth stays with React
+   auto-escaping and a strict CSP-free surface of zero third-party scripts.
 3. **Cookie thief** (network eavesdropping or local file read) — the cookie
    value is AES-256-GCM sealed with a deployment key (`ANTS_SESSION_KEY`,
    32 bytes, base64); tampering or truncation yields an unusable session,
@@ -87,8 +89,9 @@ configured `ANTS_API_BASE_URL`. Client code imports generated contract types
 continues browser → BFF → API → events/logs unchanged (ADR-0017/0018).
 
 **One opaque sealed cookie, not a token cache in the browser.** The session
-is a JSON document (tokens, expiry, identity, timestamps) sealed with
-AES-256-GCM under the deployment key, carried by a single `HttpOnly`,
+is a JSON document (access and refresh tokens, expiry, identity,
+timestamps) sealed with AES-256-GCM under the deployment key, carried by a
+single `HttpOnly`,
 `SameSite=Lax`, `path=/` cookie whose `Secure` flag follows the public
 origin's scheme. Absolute lifetime 8 hours; renewal extends tokens, never
 the window. The login transaction uses the same sealing with a 10-minute
