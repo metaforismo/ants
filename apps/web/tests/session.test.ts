@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 import type { TokenEndpointResponse, TokenEndpointResponseHelpers } from "openid-client";
 
 import { accessTokenClaims, identityFromTokenSet } from "@/lib/oidc";
-import { epochAfter, nowSeconds, sessionFromTokens } from "@/lib/session";
+import { epochAfter, nowSeconds, selectFreshSession, sessionFromTokens } from "@/lib/session";
 
 process.env.ANTS_WEB_URL ??= "http://127.0.0.1:3100";
 process.env.ANTS_API_BASE_URL ??= "http://127.0.0.1:8081";
@@ -87,5 +87,51 @@ describe("sessionFromTokens", () => {
   it("keeps renewal leeway strictly positive even without provider expiry", () => {
     expect(epochAfter(undefined)).toBeGreaterThanOrEqual(nowSeconds() + 1);
     expect(epochAfter(0)).toBe(nowSeconds() + 1);
+  });
+});
+
+describe("selectFreshSession", () => {
+  const base = {
+    accessToken: "a",
+    refreshToken: "r",
+    sub: "s",
+    username: "u",
+    tenantSlug: "t",
+    createdAt: 1000,
+  };
+  const now = 5000;
+
+  it("uses the request cookie while it is comfortably valid", () => {
+    const d = selectFreshSession({ ...base, tokenExpiresAt: now + 300 }, undefined, now);
+    expect(d).toEqual({ kind: "fresh", session: { ...base, tokenExpiresAt: now + 300 }, adopted: false });
+  });
+
+  it("renews inside the leeway window", () => {
+    const d = selectFreshSession({ ...base, tokenExpiresAt: now + 30 }, undefined, now);
+    expect(d.kind).toBe("renew");
+  });
+
+  it("expires without a refresh token once the access token is stale", () => {
+    const d = selectFreshSession(
+      { ...base, refreshToken: undefined, tokenExpiresAt: now + 10 },
+      undefined,
+      now,
+    );
+    expect(d).toEqual({ kind: "expired" });
+  });
+
+  it("adopts a strictly newer cached state instead of replaying a rotated refresh token", () => {
+    const raw = { ...base, tokenExpiresAt: now + 10 };
+    const cached = { ...base, tokenExpiresAt: now + 800 };
+    const d = selectFreshSession(raw, cached, now);
+    expect(d).toEqual({ kind: "fresh", session: cached, adopted: true });
+  });
+
+  it("ignores cache entries that are not newer than the cookie", () => {
+    const raw = { ...base, tokenExpiresAt: now + 60 };
+    const cached = { ...base, tokenExpiresAt: raw.tokenExpiresAt - 1 };
+    const d = selectFreshSession(raw, cached, now);
+    expect(d.kind).toBe("fresh");
+    if (d.kind === "fresh") expect(d.session).toEqual(raw);
   });
 });

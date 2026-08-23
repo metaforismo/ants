@@ -86,6 +86,9 @@ test.describe("token lifecycle against the real provider", () => {
       .toBe("session_expired");
 
     await page.reload();
-    await expect(page.getByText(/sign in again/i).first()).toBeVisible();
+    // A dead session bounces anonymously to the login surface; the expired
+    // card itself only renders on surfaces that had a session to lose.
+    await expect(page).toHaveURL(/\/login/);
+    await expect(page.getByTestId("login-button")).toBeVisible();
   });
 });

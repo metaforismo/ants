@@ -110,7 +110,7 @@ function isSessionData(value: unknown): value is SessionData {
  * Serializes all renewals process-wide. Keycloak rotates refresh tokens on
  * every use; two concurrent BFF requests refreshing the same session would
  * race and one would invalidate the other's rotation. Single-flight makes
- * the second request observe the already-renewed session instead.
+ * the second request wait instead of firing its own grant.
  */
 let renewQueue: Promise<unknown> = Promise.resolve();
 
@@ -126,46 +126,121 @@ export type LoadedSession = {
 };
 
 /**
+ * Renewal results are also kept in a process-local map keyed by immutable
+ * session identity (sub + tenant + creation time). A cookie is frozen at
+ * the moment its request arrived: without this map, a second concurrent
+ * request re-reads its own stale cookie and replays the pre-rotation
+ * refresh token, which the provider rejects — destroying the very session
+ * the first request just renewed. Processes exchange nothing here; each
+ * converges through its own renewals (ADR-0020 consequence).
+ */
+const renewedSessions = new Map<string, SessionData>();
+const RENEWED_CACHE_LIMIT = 512;
+
+function sessionKey(s: SessionData): string {
+  return `${s.sub}\u0000${s.tenantSlug}\u0000${s.createdAt}`;
+}
+
+function rememberRenewed(next: SessionData): void {
+  if (!renewedSessions.has(sessionKey(next)) && renewedSessions.size >= RENEWED_CACHE_LIMIT) {
+    const oldest = renewedSessions.keys().next().value;
+    if (oldest !== undefined) renewedSessions.delete(oldest);
+  }
+  renewedSessions.set(sessionKey(next), next);
+}
+
+export type FreshDecision =
+  | { kind: "fresh"; session: SessionData; adopted: boolean }
+  | { kind: "renew"; session: SessionData & { refreshToken: string } }
+  | { kind: "expired" };
+
+/**
+ * Pure renewal decision for one request: prefer a strictly newer cached
+ * state over this request's frozen cookie, then decide between using it,
+ * refreshing, or declaring the session dead. Exported for tests.
+ */
+export function selectFreshSession(
+  raw: SessionData,
+  cached: SessionData | undefined,
+  now: number,
+): FreshDecision {
+  const adopted = cached !== undefined && cached.tokenExpiresAt > raw.tokenExpiresAt;
+  const current = adopted ? cached : raw;
+  if (current.tokenExpiresAt - RENEW_LEEWAY_SECONDS > now) {
+    return { kind: "fresh", session: current, adopted };
+  }
+  if (!current.refreshToken) return { kind: "expired" };
+  return { kind: "renew", session: { ...current, refreshToken: current.refreshToken } };
+}
+
+/** Best-effort cookie convergence after adopting cached state. */
+async function persistAdopted(session: SessionData): Promise<void> {
+  try {
+    await writeSession(session);
+  } catch (err) {
+    console.error(
+      "ants-web: session cookie convergence skipped",
+      err instanceof Error ? err.message : err,
+    );
+  }
+}
+
+/**
  * Loads the current session, silently renewing the access token when it is
  * near expiry and a refresh token exists. Renewal failure with the provider
  * rejecting the grant converts to SessionExpiredError so callers render the
  * re-authentication state instead of retrying forever.
  */
 export async function loadFreshSession(): Promise<LoadedSession> {
-  const session = await readRawSession();
-  if (!session) throw new SessionExpiredError();
+  const raw = await readRawSession();
+  if (!raw) throw new SessionExpiredError();
 
-  const needsRenewal =
-    session.tokenExpiresAt - RENEW_LEEWAY_SECONDS <= nowSeconds() &&
-    session.refreshToken !== undefined;
+  let decision = selectFreshSession(raw, renewedSessions.get(sessionKey(raw)), nowSeconds());
+  if (decision.kind === "expired") throw new SessionExpiredError();
 
-  if (!needsRenewal) return { session, renewed: false };
+  if (decision.kind === "fresh" && !decision.adopted) {
+    return { session: decision.session, renewed: false };
+  }
+  if (decision.kind === "fresh") {
+    await persistAdopted(decision.session);
+    return { session: decision.session, renewed: true };
+  }
 
+  // Near expiry: serialize behind the queue, then re-derive the decision —
+  // a sibling request may have renewed while we waited.
   return enqueueRenew(async () => {
-    // Re-read after acquiring the lock: another request may have renewed
-    // this same session while we waited in the queue.
     const latest = await readRawSession();
     if (!latest) throw new SessionExpiredError();
-    if (latest.tokenExpiresAt - RENEW_LEEWAY_SECONDS > nowSeconds()) {
-      return { session: latest, renewed: true };
+    decision = selectFreshSession(latest, renewedSessions.get(sessionKey(latest)), nowSeconds());
+
+    switch (decision.kind) {
+      case "expired":
+        throw new SessionExpiredError();
+      case "fresh": {
+        if (decision.adopted) await persistAdopted(decision.session);
+        return { session: decision.session, renewed: decision.adopted };
+      }
+      case "renew": {
+        const current = decision.session;
+        let tokens: TokenSet;
+        try {
+          tokens = await oidc.refreshTokenGrant(await clientConfiguration(), current.refreshToken);
+        } catch (err) {
+          if (isInvalidGrant(err)) throw new SessionExpiredError();
+          throw err;
+        }
+        const next: SessionData = {
+          ...current,
+          accessToken: tokens.access_token,
+          refreshToken:
+            typeof tokens.refresh_token === "string" ? tokens.refresh_token : current.refreshToken,
+          tokenExpiresAt: epochAfter(tokens.expiresIn()),
+        };
+        rememberRenewed(next);
+        await writeSession(next);
+        return { session: next, renewed: true };
+      }
     }
-    if (!latest.refreshToken) throw new SessionExpiredError();
-    let tokens: TokenSet;
-    try {
-      tokens = await oidc.refreshTokenGrant(await clientConfiguration(), latest.refreshToken);
-    } catch (err) {
-      if (isInvalidGrant(err)) throw new SessionExpiredError();
-      throw err;
-    }
-    const next: SessionData = {
-      ...latest,
-      accessToken: tokens.access_token,
-      refreshToken:
-        typeof tokens.refresh_token === "string" ? tokens.refresh_token : latest.refreshToken,
-      tokenExpiresAt: epochAfter(tokens.expiresIn()),
-    };
-    await writeSession(next);
-    return { session: next, renewed: true };
   });
 }
 
