@@ -63,6 +63,37 @@ contracts-drift: ## Fail if generated types are stale relative to the OpenAPI sp
 integration-postgres: ## Run migration integration tests against a disposable Postgres container
 	./scripts/test-postgres.sh
 
+.PHONY: web-deps
+web-deps: ## Install workspace dependencies from the committed lockfile
+	$(PNPM) install --frozen-lockfile
+
+.PHONY: web-typecheck
+web-typecheck: web-deps ## Typecheck the web console
+	$(PNPM) --filter @ants/web typecheck
+
+.PHONY: web-lint
+web-lint: web-deps ## Lint the web console
+	$(PNPM) --filter @ants/web lint
+
+.PHONY: web-test
+web-test: web-deps ## Run web unit and component tests
+	$(PNPM) --filter @ants/web test
+
+.PHONY: web-build
+web-build: web-deps ## Production build of the web console
+	$(PNPM) --filter @ants/web build
+
+.PHONY: web-e2e
+web-e2e: build web-build ## Browser E2E against disposable Keycloak + real API + built console (needs Docker)
+	./scripts/test-web-e2e.sh
+
+.PHONY: keycloak-integration
+keycloak-integration: ## Run OIDC integration tests against disposable Keycloak (needs Docker)
+	./scripts/test-keycloak.sh
+
+.PHONY: ci-all
+ci-all: ci web-e2e integration-postgres keycloak-integration ## Hermetic CI plus every Docker-backed suite
+
 .PHONY: manifest-check
 manifest-check: ## Verify every direct Go dependency is recorded in third_party/manifest.yaml
 	$(GO) run ./scripts/manifestcheck
@@ -74,7 +105,7 @@ tidy-check: ## Fail if go.mod/go.sum are not tidy
 		|| (echo "go.mod/go.sum changed; commit the tidied versions" && exit 1)
 
 .PHONY: ci
-ci: fmt-check vet lint tidy-check manifest-check test test-race build contracts-test contracts-drift ## Full local CI suite
+ci: fmt-check vet lint tidy-check manifest-check test test-race build contracts-test contracts-drift web-typecheck web-lint web-test web-build ## Full hermetic local CI suite (Docker-backed suites live in ci-all)
 
 .PHONY: clean
 clean: ## Remove build artifacts

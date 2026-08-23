@@ -60,3 +60,54 @@ dependencies:
     purpose: Generates TypeScript types from openapi/v1/openapi.yaml so web
       clients consume generated shapes instead of hand-copied ones.
     notes: Zero-runtime-dependency generator; output committed for review.
+
+  - module: openid-client (npm, apps/web dependency)
+    version: 6.8.7
+    license: MIT
+    decision: adopt
+    purpose: OIDC relying-party protocol engine for the web console
+      (ADR-0020) — discovery, Authorization Code + PKCE (S256) URL
+      construction, code exchange with ID-token validation (issuer,
+      audience, nonce), refresh grant, end-session URL.
+    notes: Maintained by panva; certified test coverage and the de-facto
+      Node OIDC library per master plan OSS atlas posture on security-
+      critical primitives. Session lifecycle, cookie sealing, CSRF, and
+      identity mapping stay in apps/web (ADR-0020); hand-rolling any of the
+      protocol steps was rejected per ADR-0008.
+
+  - module: next (npm, apps/web dependency)
+    version: 16.3.2
+    license: MIT
+    decision: adopt
+    purpose: App Router server rendering and route handlers hosting the BFF
+      (session routes and the /v1 proxy).
+    notes: Named by master plan sections 2/14.7 for the web/PWA client.
+      Server-only session handling relies on Next server semantics; no
+      tokens are emitted into client bundles.
+
+  - module: react / react-dom (npm, apps/web dependencies)
+    version: 19.2.8
+    license: MIT
+    decision: adopt
+    purpose: UI runtime for the console surface.
+    notes: Paired with Next 16 App Router; pinned to identical versions.
+
+  - module: "@tanstack/react-query (npm, apps/web dependency)"
+    version: 5.102.0
+    license: MIT
+    decision: adopt
+    purpose: Server-state management for operational data (thread list,
+      workspace, run panel) with bounded polling and typed retry.
+    notes: Named by master plan OSS atlas section 14.7 for exactly this
+      role; polling intervals live in components, never behind abstractions.
+
+  - module: "@playwright/test (npm, apps/web devDependency)"
+    version: 1.62.1
+    license: Apache-2.0
+    decision: adopt
+    purpose: Browser E2E suite against the disposable local stack of
+      scripts/test-web-e2e.sh — login, operate, observe, session security
+      states, responsive viewport behavior.
+    notes: Named by master plan OSS atlas section 14.7. Browsers install
+      into developer/CI caches only; the suite runs exclusively against
+      loopback fixtures.

@@ -105,7 +105,8 @@ export interface paths {
             path?: never;
             cookie?: never;
         };
-        get?: never;
+        /** List threads of the authenticated tenant */
+        get: operations["listThreads"];
         put?: never;
         /** Open a thread on a project */
         post: operations["createThread"];
@@ -365,6 +366,9 @@ export interface components {
             version: number;
             created_at: components["schemas"]["Timestamp"];
             updated_at: components["schemas"]["Timestamp"];
+        };
+        ThreadList: {
+            threads: components["schemas"]["Thread"][];
         };
         CreateThreadRequest: {
             project_id: components["schemas"]["ProjectID"];
@@ -705,6 +709,30 @@ export interface operations {
                 };
             };
             400: components["responses"]["Problem"];
+            401: components["responses"]["Problem"];
+        };
+    };
+    listThreads: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /**
+             * @description Threads ordered by most recent update, bounded to a
+             *     server-defined page size.
+             */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ThreadList"];
+                };
+            };
             401: components["responses"]["Problem"];
         };
     };

@@ -140,6 +140,52 @@
           }
         }
       ]
+    },
+    {
+      "clientId": "ants-web",
+      "enabled": true,
+      "protocol": "openid-connect",
+      "publicClient": true,
+      "standardFlowEnabled": true,
+      "directAccessGrantsEnabled": false,
+      "serviceAccountsEnabled": false,
+      "redirectUris": [
+        "http://127.0.0.1:3100/api/auth/callback",
+        "http://localhost:3100/api/auth/callback"
+      ],
+      "webOrigins": [
+        "http://127.0.0.1:3100",
+        "http://localhost:3100"
+      ],
+      "attributes": {
+        "pkce.code.challenge.method": "S256",
+        "access.token.lifespan": "60"
+      },
+      "defaultClientScopes": ["basic", "profile", "email"],
+      "protocolMappers": [
+        {
+          "name": "ants-tenant",
+          "protocol": "openid-connect",
+          "protocolMapper": "oidc-usermodel-attribute-mapper",
+          "config": {
+            "user.attribute": "ants_tenant",
+            "claim.name": "ants_tenant",
+            "jsonType.label": "String",
+            "id.token.claim": "true",
+            "access.token.claim": "true",
+            "userinfo.token.claim": "false"
+          }
+        },
+        {
+          "name": "ants-api-audience",
+          "protocol": "openid-connect",
+          "protocolMapper": "oidc-audience-mapper",
+          "config": {
+            "included.client.audience": "ants-api",
+            "access.token.claim": "true"
+          }
+        }
+      ]
     }
   ],
   "users": [
@@ -181,6 +227,42 @@
         {
           "type": "password",
           "value": "fixture-alice-password",
+          "temporary": false
+        }
+      ]
+    },
+    {
+      "username": "bob",
+      "enabled": true,
+      "email": "bob@fixture.local",
+      "emailVerified": true,
+      "firstName": "Bob",
+      "lastName": "Fixture",
+      "attributes": {
+        "ants_tenant": ["acme"]
+      },
+      "credentials": [
+        {
+          "type": "password",
+          "value": "fixture-bob-password",
+          "temporary": false
+        }
+      ]
+    },
+    {
+      "username": "carol",
+      "enabled": true,
+      "email": "carol@fixture.local",
+      "emailVerified": true,
+      "firstName": "Carol",
+      "lastName": "Fixture",
+      "attributes": {
+        "ants_tenant": ["acme"]
+      },
+      "credentials": [
+        {
+          "type": "password",
+          "value": "fixture-carol-password",
           "temporary": false
         }
       ]

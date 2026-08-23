@@ -126,6 +126,10 @@ func Run(t *testing.T, f Factory) {
 		repos, _ := world()
 		testThreadConcurrency(t, repos)
 	})
+	t.Run("ThreadListIsTenantScopedAndOrdered", func(t *testing.T) {
+		repos, _ := world()
+		testThreadListScopesAndOrders(t, repos)
+	})
 	t.Run("RunIdempotencyKeyUniquePerThread", func(t *testing.T) {
 		repos, _ := world()
 		testRunIdempotency(t, repos)
@@ -284,6 +288,82 @@ func testThreadConcurrency(t *testing.T, repos ports.Repositories) {
 	if err != nil || len(messages) != 1 || total != 1 {
 		t.Fatalf("messages: %d/%d %v", len(messages), total, err)
 	}
+}
+
+// testThreadListScopesAndOrders pins the list contract behind the web
+// surface: only the caller's tenant's threads come back, most recently
+// updated first, honoring the limit, with foreign rows indistinguishable
+// from nonexistent ones (ADR-0004).
+func testThreadListScopesAndOrders(t *testing.T, repos ports.Repositories) {
+	ctx := context.Background()
+	seedTenant(ctx, t, repos, tenantID, "acme")
+	otherID := domain.TenantID(tid("ten", "othertenant0000000000"))
+	seedTenant(ctx, t, repos, otherID, "other")
+	project := seedProject(ctx, t, repos, tenantID)
+	foreignProject := seedForeignProject(ctx, t, repos, otherID)
+
+	first := seedThreadAt(ctx, t, repos, tenantID, project.ID, "first thread", fixedTime(10))
+	second := seedThreadAt(ctx, t, repos, tenantID, project.ID, "second thread", fixedTime(20))
+	seedThreadAt(ctx, t, repos, otherID, foreignProject.ID, "foreign thread", fixedTime(30))
+
+	// Equal updated_at must still yield one deterministic order on every
+	// store implementation: ties resolve by ascending id.
+	tieB := seedThreadAt(ctx, t, repos, tenantID, project.ID, "tie b", fixedTime(40))
+	tieA := seedThreadAt(ctx, t, repos, tenantID, project.ID, "tie a", fixedTime(40))
+
+	list, err := repos.Threads.ListByTenant(ctx, tenantID, 0)
+	if err != nil {
+		t.Fatalf("list: %v", err)
+	}
+	if len(list) != 4 {
+		t.Fatalf("tenant list must contain exactly its own threads, got %d: %+v", len(list), list)
+	}
+	tieFirst, tieSecond := tieA.ID, tieB.ID
+	if tieSecond < tieFirst {
+		tieFirst, tieSecond = tieSecond, tieFirst
+	}
+	wantOrder := []domain.ThreadID{tieFirst, tieSecond, second.ID, first.ID}
+	for i, want := range wantOrder {
+		if list[i].ID != want {
+			t.Fatalf("list position %d = %s, want %s (updated desc, id asc)", i, list[i].ID, want)
+		}
+	}
+
+	bounded, err := repos.Threads.ListByTenant(ctx, tenantID, 1)
+	if err != nil || len(bounded) != 1 || bounded[0].ID != tieFirst {
+		t.Fatalf("limit must keep the newest entries: %+v %v", bounded, err)
+	}
+
+	empty, err := repos.Threads.ListByTenant(ctx, domain.TenantID(tid("ten", "unknowntenant000000")), 0)
+	if err != nil || len(empty) != 0 {
+		t.Fatalf("unknown tenant must list empty without error: %+v %v", empty, err)
+	}
+}
+
+func seedForeignProject(ctx context.Context, t *testing.T, repos ports.Repositories, owner domain.TenantID) *domain.Project {
+	t.Helper()
+	idStr, _ := domain.NewID(domain.PrefixProject)
+	project, err := domain.NewProject(domain.ProjectID(idStr), owner, "calc", "Calculator", "main", "", fixedTime(1))
+	if err != nil {
+		t.Fatalf("seed foreign project: %v", err)
+	}
+	if err := repos.Projects.Create(ctx, project); err != nil {
+		t.Fatalf("create foreign project: %v", err)
+	}
+	return project
+}
+
+func seedThreadAt(ctx context.Context, t *testing.T, repos ports.Repositories, owner domain.TenantID, projectID domain.ProjectID, title string, at time.Time) *domain.Thread {
+	t.Helper()
+	idStr, _ := domain.NewID(domain.PrefixThread)
+	thread, err := domain.NewThread(domain.ThreadID(idStr), owner, projectID, title, principal, at)
+	if err != nil {
+		t.Fatalf("seed thread: %v", err)
+	}
+	if err := repos.Threads.Create(ctx, thread); err != nil {
+		t.Fatalf("create thread: %v", err)
+	}
+	return thread
 }
 
 func testRunIdempotency(t *testing.T, repos ports.Repositories) {

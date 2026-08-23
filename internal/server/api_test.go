@@ -465,3 +465,59 @@ func TestReadyzReportsTypedProviderFailure(t *testing.T) {
 		t.Fatalf("readiness must name the failing dependency, got %s", raw)
 	}
 }
+
+// TestThreadListIsTenantScopedAndOrdered pins the list contract the web
+// thread-list surface consumes: one bounded page per tenant, most recently
+// updated first, with foreign threads never appearing.
+func TestThreadListIsTenantScopedAndOrdered(t *testing.T) {
+	e := newEnv(t)
+	_, threadA := e.seedProjectThread(e.tenantAS)
+
+	var created map[string]any
+	e.doJSON(t, http.MethodPost, "/v1/threads", e.tenantAS, map[string]any{
+		"project_id": projectOf(t, &e, threadA),
+		"title":      "newer thread",
+	}, &created, http.StatusCreated)
+
+	var list struct {
+		Threads []struct {
+			ID        string `json:"id"`
+			Title     string `json:"title"`
+			TenantID  string `json:"tenant_id"`
+			Status    string `json:"status"`
+			UpdatedAt string `json:"updated_at"`
+		} `json:"threads"`
+	}
+	e.doJSON(t, http.MethodGet, "/v1/threads", e.tenantAS, nil, &list, http.StatusOK)
+	if len(list.Threads) != 2 {
+		t.Fatalf("tenant A must see exactly its two threads, got %d", len(list.Threads))
+	}
+	if list.Threads[0].Title != "newer thread" {
+		t.Fatalf("list must order most recently updated first, got %q", list.Threads[0].Title)
+	}
+	for _, th := range list.Threads {
+		if th.Status != "idle" || th.TenantID == "" {
+			t.Fatalf("list entries must be full thread records: %+v", th)
+		}
+	}
+
+	var foreign struct {
+		Threads []map[string]any `json:"threads"`
+	}
+	e.doJSON(t, http.MethodGet, "/v1/threads", e.tenantBS, nil, &foreign, http.StatusOK)
+	if len(foreign.Threads) != 0 {
+		t.Fatalf("tenant B must not see A's threads, got %d", len(foreign.Threads))
+	}
+
+	status, _, raw := e.do(http.MethodGet, "/v1/threads", map[string]string{}, "")
+	if status != http.StatusUnauthorized {
+		t.Fatalf("unauthenticated list gave %d, want 401 (%s)", status, truncate(raw))
+	}
+}
+
+func projectOf(t *testing.T, e **env, threadID string) string {
+	t.Helper()
+	var thread map[string]any
+	(*e).doJSON(t, http.MethodGet, "/v1/threads/"+threadID, (*e).tenantAS, nil, &thread, http.StatusOK)
+	return thread["project_id"].(string)
+}

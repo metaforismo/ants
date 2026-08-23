@@ -150,6 +150,7 @@ func APIRoutes() []Route {
 		{Method: http.MethodGet, Path: "/v1/projects", Auth: true},
 		{Method: http.MethodPost, Path: "/v1/projects", Auth: true},
 		{Method: http.MethodPost, Path: "/v1/threads", Auth: true},
+		{Method: http.MethodGet, Path: "/v1/threads", Auth: true},
 		{Method: http.MethodGet, Path: "/v1/threads/{id}", Auth: true},
 		{Method: http.MethodPost, Path: "/v1/threads/{id}/messages", Auth: true},
 		{Method: http.MethodGet, Path: "/v1/threads/{id}/messages", Auth: true},
@@ -190,7 +191,11 @@ func (s *Server) routes(mux *http.ServeMux) {
 					handler = s.handleCreateProject
 				}
 			case "/v1/threads":
-				handler = s.handleCreateThread
+				if route.Method == http.MethodGet {
+					handler = s.handleListThreads
+				} else {
+					handler = s.handleCreateThread
+				}
 			case "/v1/threads/{id}":
 				handler = s.handleGetThread
 			case "/v1/threads/{id}/messages":
