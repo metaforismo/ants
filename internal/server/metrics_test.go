@@ -24,6 +24,7 @@ func scrapeServer(t *testing.T, mutate func(*config.Config)) *httptest.Server {
 	srv, err := server.New(server.Deps{
 		Config:  cfg,
 		Repos:   application.Repos,
+		Auth:    &fakeAuthenticator{tenants: application.Repos.Tenants},
 		Uow:     application.Uow,
 		Engine:  application.Engine,
 		Logger:  slog.New(slog.NewTextHandler(io.Discard, nil)),
@@ -43,9 +44,7 @@ func scrapeServer(t *testing.T, mutate func(*config.Config)) *httptest.Server {
 // are labeled with the pinned route pattern (never raw paths), and unmatched
 // requests land on one constant label.
 func TestMetricsEndpointServesBoundedSeries(t *testing.T) {
-	cfg := config.Defaults()
-	cfg.Server.DevHeaderAuth = true
-	ts := scrapeServer(t, func(c *config.Config) { *c = cfg })
+	ts := scrapeServer(t, nil)
 
 	e := &env{t: t, baseURL: ts.URL}
 	e.doJSON(t, http.MethodPost, "/v1/tenants", "", map[string]any{
@@ -129,6 +128,7 @@ func TestDisabledMetricsAllowNilCollector(t *testing.T) {
 	srv, err := server.New(server.Deps{
 		Config: cfg,
 		Repos:  application.Repos,
+		Auth:   &fakeAuthenticator{tenants: application.Repos.Tenants},
 		Uow:    application.Uow,
 		Engine: application.Engine,
 		Logger: slog.New(slog.NewTextHandler(io.Discard, nil)),

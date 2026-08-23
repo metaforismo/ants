@@ -70,7 +70,6 @@ func (f *flakyTasks) ListByRun(ctx context.Context, tenantID domain.TenantID, ru
 func auditServer(t *testing.T, mutate func(r *ports.Repositories)) (*httptest.Server, *app.App) {
 	t.Helper()
 	cfg := config.Defaults()
-	cfg.Server.DevHeaderAuth = true
 	application := buildApp(t, cfg)
 	repos := application.Repos
 	if mutate != nil {
@@ -79,6 +78,7 @@ func auditServer(t *testing.T, mutate func(r *ports.Repositories)) (*httptest.Se
 	srv, err := server.New(server.Deps{
 		Config:  cfg,
 		Repos:   repos,
+		Auth:    &fakeAuthenticator{tenants: application.Repos.Tenants},
 		Uow:     application.Uow,
 		Engine:  application.Engine,
 		Logger:  slog.New(slog.NewTextHandler(io.Discard, nil)),

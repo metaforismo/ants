@@ -20,8 +20,8 @@ func TestDefaultsValidate(t *testing.T) {
 	if err := cfg.Validate(); err != nil {
 		t.Fatalf("defaults must validate: %v", err)
 	}
-	if cfg.Server.DevHeaderAuth {
-		t.Fatalf("dev auth must default to off")
+	if cfg.Auth.OIDC.Configured() {
+		t.Fatalf("OIDC must default to unconfigured (refuse-all posture)")
 	}
 	if cfg.Store.Mode != StoreModeMemory {
 		t.Fatalf("memory store is the safe default")
@@ -171,6 +171,31 @@ func TestValidationFailures(t *testing.T) {
 		},
 		func(c *Config) { c.Log.Level = "verbose" },
 		func(c *Config) { c.Log.Format = "csv" },
+		// OIDC misconfigurations must fail startup, never authenticate nobody
+		// silently (ADR-0019).
+		func(c *Config) {
+			c.Auth.OIDC = oidcDefaults("http://127.0.0.1:8081/r").Auth.OIDC
+			c.Auth.OIDC.Audience = ""
+		},
+		func(c *Config) {
+			c.Auth.OIDC = oidcDefaults("not-a-url").Auth.OIDC
+		},
+		func(c *Config) {
+			c.Auth.OIDC = oidcDefaults("http://127.0.0.1:8081/r").Auth.OIDC
+			c.Auth.OIDC.JWKSRefreshInterval = Duration{time.Millisecond}
+		},
+		func(c *Config) {
+			c.Auth.OIDC = oidcDefaults("http://127.0.0.1:8081/r").Auth.OIDC
+			c.Auth.OIDC.ClockSkew = Duration{-1}
+		},
+		func(c *Config) {
+			c.Auth.OIDC = oidcDefaults("http://127.0.0.1:8081/r").Auth.OIDC
+			c.Auth.OIDC.HTTPTimeout = Duration{time.Minute}
+		},
+		func(c *Config) {
+			c.Auth.OIDC = oidcDefaults("http://127.0.0.1:8081/r").Auth.OIDC
+			c.Auth.OIDC.TenantClaim = "tenant slug with spaces"
+		},
 	}
 	for i, mutate := range cases {
 		cfg := Defaults()
@@ -181,48 +206,84 @@ func TestValidationFailures(t *testing.T) {
 	}
 }
 
-// TestDevHeaderAuthConfinedToLoopback pins the ADR-0004 production gate: the
-// development posture that trusts unauthenticated identity headers can never
-// serve a bind reachable beyond this machine. Startup fails instead of
-// exposing tenant switching to the network.
-func TestDevHeaderAuthConfinedToLoopback(t *testing.T) {
+// TestOIDCIssuerConfinedToLoopbackOverHTTP pins the ADR-0019 transport rule:
+// a plaintext issuer may only be a literal loopback host (local Keycloak),
+// while anything remote must be https. The same class of gate ADR-0004 and
+// ADR-0013 applied to dev auth now guards the IdP trust root.
+func TestOIDCIssuerConfinedToLoopbackOverHTTP(t *testing.T) {
 	loopback := []string{
-		"127.0.0.1:8080",
-		"127.9.9.9:8080",
-		"[::1]:8080",
-		"localhost:8080",
+		"http://127.0.0.1:8081/realms/ants",
+		"http://127.9.9.9:8081/realms/ants",
+		"http://[::1]:8081/realms/ants",
+		"http://localhost:8081/realms/ants",
 	}
-	for _, addr := range loopback {
-		cfg := Defaults()
-		cfg.Server.DevHeaderAuth = true
-		cfg.Server.HTTPAddr = addr
+	for _, issuer := range loopback {
+		cfg := oidcDefaults(issuer)
 		if err := cfg.Validate(); err != nil {
-			t.Fatalf("dev auth on loopback %s must validate: %v", addr, err)
+			t.Fatalf("plaintext loopback issuer %s must validate: %v", issuer, err)
 		}
 	}
 
 	exposed := []string{
-		"0.0.0.0:8080",
-		"[::]:8080",
-		"192.168.1.10:8080",
-		"ants.example.com:8080",
+		"http://192.168.1.10:8081/realms/ants",
+		"http://keycloak.internal:8081/realms/ants",
 	}
-	for _, addr := range exposed {
-		cfg := Defaults()
-		cfg.Server.DevHeaderAuth = true
-		cfg.Server.HTTPAddr = addr
+	for _, issuer := range exposed {
+		cfg := oidcDefaults(issuer)
 		if err := cfg.Validate(); err == nil {
-			t.Fatalf("dev auth on non-loopback %s must fail startup", addr)
-		} else if !strings.Contains(err.Error(), "dev_header_auth") {
-			t.Fatalf("refusal must name dev_header_auth: %v", err)
-		}
-
-		// The same binds are fine without the development posture.
-		cfg.Server.DevHeaderAuth = false
-		if err := cfg.Validate(); err != nil {
-			t.Fatalf("non-loopback bind without dev auth must validate: %v", err)
+			t.Fatalf("plaintext non-loopback issuer %s must fail startup", issuer)
+		} else if !strings.Contains(err.Error(), "https") {
+			t.Fatalf("refusal must name the https requirement: %v", err)
 		}
 	}
+	cfg := oidcDefaults("https://sso.example.com/realms/ants")
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("https issuer must validate over any host: %v", err)
+	}
+}
+
+// TestOIDCPartialConfigurationRejected pins the all-or-nothing rule: an
+// audience without an issuer is a typo, not a configuration.
+func TestOIDCPartialConfigurationRejected(t *testing.T) {
+	cfg := Defaults()
+	cfg.Auth.OIDC.Audience = "ants-api"
+	if err := cfg.Validate(); err == nil || !strings.Contains(err.Error(), "issuer_url") {
+		t.Fatalf("audience without issuer must fail loudly, got %v", err)
+	}
+}
+
+func TestOIDCEnvLayering(t *testing.T) {
+	cfg, err := load("", lookupFrom(map[string]string{
+		"ANTS_AUTH_OIDC_ISSUER_URL":            "http://127.0.0.1:8081/realms/ants",
+		"ANTS_AUTH_OIDC_AUDIENCE":              "ants-api",
+		"ANTS_AUTH_OIDC_TENANT_CLAIM":          "org_tenant",
+		"ANTS_AUTH_OIDC_JWKS_REFRESH_INTERVAL": "5m",
+		"ANTS_AUTH_OIDC_CLOCK_SKEW":            "10s",
+		"ANTS_AUTH_OIDC_HTTP_TIMEOUT":          "2s",
+	}))
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	if !cfg.Auth.OIDC.Configured() {
+		t.Fatal("issuer env not applied")
+	}
+	if cfg.Auth.OIDC.Audience != "ants-api" ||
+		cfg.Auth.OIDC.TenantClaim != "org_tenant" ||
+		cfg.Auth.OIDC.JWKSRefreshInterval.Duration != 5*time.Minute ||
+		cfg.Auth.OIDC.ClockSkew.Duration != 10*time.Second ||
+		cfg.Auth.OIDC.HTTPTimeout.Duration != 2*time.Second {
+		t.Fatalf("oidc env overrides not applied: %+v", cfg.Auth.OIDC)
+	}
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("layered oidc config must validate: %v", err)
+	}
+}
+
+func oidcDefaults(issuer string) Config {
+	cfg := Defaults()
+	cfg.Auth.OIDC.IssuerURL = issuer
+	cfg.Auth.OIDC.Audience = "ants-api"
+	return cfg
 }
 
 func TestWorkerEnvLayering(t *testing.T) {

@@ -4,18 +4,22 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"sync"
 	"testing"
 	"time"
 
 	"github.com/metaforismo/ants/internal/app"
 	"github.com/metaforismo/ants/internal/config"
+	"github.com/metaforismo/ants/internal/domain"
 	"github.com/metaforismo/ants/internal/fixtures"
+	"github.com/metaforismo/ants/internal/ports"
 	"github.com/metaforismo/ants/internal/sandbox"
 	"github.com/metaforismo/ants/internal/server"
 )
@@ -46,6 +50,58 @@ func uniqueSuffix() string {
 
 const testPrincipal = "prn_e2etestprincipal00000"
 
+// fakeToken renders the deterministic credential the fake authenticator
+// accepts: "Bearer <tenant slug>:<principal id>". It stands in for a signed
+// JWT at the trust boundary so handler-level tests exercise real tenant
+// resolution semantics without a live identity provider.
+func fakeToken(tenantSlug string) string {
+	return "Bearer " + tenantSlug + ":" + testPrincipal
+}
+
+// fakeAuthenticator implements server.Authenticator with production-shaped
+// negative semantics: missing/malformed credentials, unknown tenants, and
+// invalid principals all refuse exactly as the OIDC verifier would.
+type fakeAuthenticator struct {
+	tenants ports.TenantStore
+}
+
+func (f *fakeAuthenticator) Authenticate(r *http.Request) (*server.Principal, *domain.Error) {
+	const scheme = "Bearer "
+	header := r.Header.Get("Authorization")
+	if !strings.HasPrefix(header, scheme) {
+		return nil, &domain.Error{
+			Kind:    domain.ErrKindUnauthorized,
+			Code:    "missing_bearer_token",
+			Message: "authentication required",
+		}
+	}
+	slug, principal, ok := strings.Cut(strings.TrimPrefix(header, scheme), ":")
+	if !ok {
+		return nil, &domain.Error{
+			Kind:    domain.ErrKindUnauthorized,
+			Code:    "invalid_authorization_header",
+			Message: "credential must be <tenant>:<principal>",
+		}
+	}
+	if _, err := domain.ParsePrincipalID(principal); err != nil {
+		return nil, &domain.Error{
+			Kind:    domain.ErrKindUnauthorized,
+			Code:    "invalid_principal",
+			Message: "principal component is not a valid principal id",
+		}
+	}
+	tenant, err := f.tenants.GetBySlug(r.Context(), slug)
+	var domErr *domain.Error
+	switch {
+	case err == nil:
+	case errors.As(err, &domErr) && domErr.Kind == domain.ErrKindNotFound:
+		return nil, &domain.Error{Kind: domain.ErrKindUnauthorized, Code: "unknown_tenant", Message: "tenant not recognized"}
+	default:
+		return nil, &domain.Error{Kind: domain.ErrKindTransient, Code: "tenant_store_unavailable", Message: "tenant store unavailable"}
+	}
+	return &server.Principal{TenantID: tenant.ID, Tenant: tenant, ID: domain.PrincipalID(principal)}, nil
+}
+
 // flippableReadiness lets tests drive the /readyz dependency verdict without
 // touching real infrastructure: the check is swapped atomically at runtime.
 type flippableReadiness struct {
@@ -68,11 +124,6 @@ func (f *flippableReadiness) set(fn func(context.Context) error) {
 	f.fn = fn
 }
 
-func buildServer(t *testing.T, cfg config.Config, application *app.App) *httptest.Server {
-	t.Helper()
-	return buildServerWithReady(t, cfg, application, application.Ready)
-}
-
 func buildServerWithReady(
 	t *testing.T,
 	cfg config.Config,
@@ -83,6 +134,7 @@ func buildServerWithReady(
 	srv, err := server.New(server.Deps{
 		Config:  cfg,
 		Repos:   application.Repos,
+		Auth:    &fakeAuthenticator{tenants: application.Repos.Tenants},
 		Uow:     application.Uow,
 		Engine:  application.Engine,
 		Logger:  slog.New(slog.NewTextHandler(io.Discard, nil)),
@@ -133,7 +185,6 @@ func newEnvWithoutRuntime(t *testing.T) *env {
 func newEnvWithRuntime(t *testing.T, withRuntime bool) *env {
 	t.Helper()
 	cfg := config.Defaults()
-	cfg.Server.DevHeaderAuth = true
 	application := buildApp(t, cfg)
 	ready := &flippableReadiness{}
 	ts := buildServerWithReady(t, cfg, application, ready.Check)
@@ -178,9 +229,8 @@ func startRuntime(t *testing.T, application *app.App) {
 
 func (e *env) headers(tenantSlug string) map[string]string {
 	return map[string]string{
-		"X-Ants-Dev-Tenant":    tenantSlug,
-		"X-Ants-Dev-Principal": testPrincipal,
-		"Content-Type":         "application/json",
+		"Authorization": fakeToken(tenantSlug),
+		"Content-Type":  "application/json",
 	}
 }
 

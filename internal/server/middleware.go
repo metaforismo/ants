@@ -204,6 +204,13 @@ func (s *Server) withRequestLog(route string, requiresAuth bool, next http.Handl
 		if requiresAuth {
 			principal, derr := s.auth.Authenticate(r)
 			if derr != nil {
+				// RFC 6750: bearer-protected resources advertise the scheme
+				// on 401s. Only set when OIDC actually guards this server so
+				// the unconfigured refusal does not advertise a scheme it
+				// cannot honor.
+				if derr.Kind == domain.ErrKindUnauthorized && s.cfg.Auth.OIDC.Configured() {
+					writer.Header().Set("WWW-Authenticate", `Bearer`)
+				}
 				writeProblem(writer, r, derr)
 				return
 			}

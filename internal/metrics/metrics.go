@@ -34,6 +34,10 @@ type Metrics struct {
 	httpRequestDuration *prometheus.HistogramVec
 	httpInFlight        prometheus.Gauge
 
+	// authTokens instruments the OIDC verifier's outcomes (ADR-0019); the
+	// result label is a fixed vocabulary owned by internal/authn.
+	authTokens prometheus.CounterVec
+
 	outboxMessages       *prometheus.GaugeVec
 	outboxRounds         prometheus.Counter
 	outboxMessagesLeased prometheus.Counter
@@ -81,6 +85,14 @@ func New() *Metrics {
 				Name:      "http_requests_in_flight",
 				Help:      "Requests currently being served.",
 			},
+		),
+		authTokens: *prometheus.NewCounterVec(
+			prometheus.CounterOpts{
+				Namespace: namespace,
+				Name:      "auth_tokens_total",
+				Help:      "Bearer token verification outcomes at the API edge, by fixed-vocabulary result (ADR-0019).",
+			},
+			[]string{"result"},
 		),
 		outboxMessages: prometheus.NewGaugeVec(
 			prometheus.GaugeOpts{
@@ -178,6 +190,7 @@ func New() *Metrics {
 		m.httpRequestsTotal,
 		m.httpRequestDuration,
 		m.httpInFlight,
+		&m.authTokens,
 		m.outboxMessages,
 		m.outboxRounds,
 		m.outboxMessagesLeased,
@@ -210,6 +223,13 @@ func (m *Metrics) HTTPInFlightDec() { m.httpInFlight.Dec() }
 func (m *Metrics) HTTPObserveRequest(method, route string, status int, d time.Duration) {
 	m.httpRequestsTotal.WithLabelValues(method, route, strconv.Itoa(status)).Inc()
 	m.httpRequestDuration.WithLabelValues(method, route).Observe(d.Seconds())
+}
+
+// AuthToken records one bearer-token verification outcome (authn.Observer).
+// result comes from the fixed vocabulary exported by internal/authn;
+// identifiers never become labels (ADR-0014 cardinality rule).
+func (m *Metrics) AuthToken(result string) {
+	m.authTokens.WithLabelValues(result).Inc()
 }
 
 // RoundLeased records one dispatch round whose lease step succeeded and the

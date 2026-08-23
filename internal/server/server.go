@@ -27,54 +27,23 @@ type Principal struct {
 	ID       domain.PrincipalID
 }
 
+// Authenticator is the authentication seam (ADR-0004). Production wires the
+// OIDC resource-server verifier (internal/authn); with no provider
+// configured, UnconfiguredAuthenticator refuses every request. There is no
+// development bypass anywhere in the composition surface (ADR-0019).
 type Authenticator interface {
 	Authenticate(r *http.Request) (*Principal, *domain.Error)
 }
 
-// DevHeaderAuthenticator implements local development auth via explicit
-// headers. It must never be enabled outside development.
-type DevHeaderAuthenticator struct {
-	Tenants ports.TenantStore
-}
-
-const (
-	headerDevTenant    = "X-Ants-Dev-Tenant"
-	headerDevPrincipal = "X-Ants-Dev-Principal"
-)
-
-func (a *DevHeaderAuthenticator) Authenticate(r *http.Request) (*Principal, *domain.Error) {
-	slug := r.Header.Get(headerDevTenant)
-	if slug == "" {
-		return nil, &domain.Error{
-			Kind:    domain.ErrKindUnauthorized,
-			Code:    "missing_tenant_header",
-			Message: fmt.Sprintf("header %s is required", headerDevTenant),
-		}
-	}
-	principal := r.Header.Get(headerDevPrincipal)
-	if _, err := domain.ParsePrincipalID(principal); err != nil {
-		return nil, &domain.Error{
-			Kind:    domain.ErrKindUnauthorized,
-			Code:    "invalid_principal",
-			Message: fmt.Sprintf("header %s must contain a valid principal id", headerDevPrincipal),
-		}
-	}
-	tenant, err := a.Tenants.GetBySlug(r.Context(), slug)
-	if err != nil {
-		return nil, &domain.Error{Kind: domain.ErrKindUnauthorized, Code: "unknown_tenant", Message: "tenant not recognized"}
-	}
-	return &Principal{TenantID: tenant.ID, Tenant: tenant, ID: domain.PrincipalID(principal)}, nil
-}
-
-// UnconfiguredAuthenticator refuses every request: production requires real
-// OIDC, and silently serving unauthenticated traffic is not acceptable.
+// UnconfiguredAuthenticator refuses every request: serving unauthenticated
+// traffic silently is never acceptable.
 type UnconfiguredAuthenticator struct{}
 
 func (UnconfiguredAuthenticator) Authenticate(_ *http.Request) (*Principal, *domain.Error) {
 	return nil, &domain.Error{
 		Kind:    domain.ErrKindUnauthorized,
 		Code:    "authentication_not_configured",
-		Message: "no authentication provider configured; enable dev_header_auth only for local development or deploy OIDC",
+		Message: "no identity provider configured; set auth.oidc.issuer_url and auth.oidc.audience to enable authentication",
 	}
 }
 
@@ -101,6 +70,10 @@ type Server struct {
 type Deps struct {
 	Config config.Config
 	Repos  ports.Repositories
+	// Auth authenticates every route marked Auth in the route table.
+	// Required: a server must be told explicitly whether it verifies OIDC
+	// tokens or refuses everything — never neither (ADR-0019).
+	Auth Authenticator
 	// Uow delimits units of work so a resource and its creation event commit
 	// together (ADR-0010). Required: an API write that emits an event must
 	// never be able to commit the state and lose the notification.
@@ -126,17 +99,17 @@ func New(deps Deps) (*Server, error) {
 	if deps.Config.Metrics.Enabled && deps.Metrics == nil {
 		return nil, fmt.Errorf("server: metrics are enabled but no collector was provided")
 	}
-	var auth Authenticator
-	if deps.Config.Server.DevHeaderAuth {
-		auth = &DevHeaderAuthenticator{Tenants: deps.Repos.Tenants}
-	} else {
-		auth = UnconfiguredAuthenticator{}
+	// Authentication is injected, never chosen inside the server: the
+	// composition root decides between OIDC verification and explicit
+	// refusal (ADR-0019), and tests wire deterministic fakes.
+	if deps.Auth == nil {
+		return nil, fmt.Errorf("server: an authenticator is required; wire the OIDC verifier or UnconfiguredAuthenticator{}")
 	}
 	srv := &Server{
 		cfg:     deps.Config,
 		repos:   deps.Repos,
 		uow:     deps.Uow,
-		auth:    auth,
+		auth:    deps.Auth,
 		engine:  deps.Engine,
 		ready:   deps.Ready,
 		log:     deps.Logger,
@@ -271,7 +244,11 @@ func (s *Server) Handler() http.Handler { return s.http.Handler }
 
 // Start serves until Shutdown; listener errors are returned to the caller.
 func (s *Server) Start() error {
-	s.log.Info("ants api listening", "addr", s.cfg.Server.HTTPAddr, "dev_auth", s.cfg.Server.DevHeaderAuth)
+	mode := "unconfigured"
+	if s.cfg.Auth.OIDC.Configured() {
+		mode = "oidc"
+	}
+	s.log.Info("ants api listening", "addr", s.cfg.Server.HTTPAddr, "auth", mode)
 	err := s.http.ListenAndServe()
 	if err == http.ErrServerClosed {
 		return nil

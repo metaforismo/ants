@@ -4,13 +4,17 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"io"
+	"log/slog"
 	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
 
 	"github.com/metaforismo/ants/internal/config"
 	"github.com/metaforismo/ants/internal/domain"
 	"github.com/metaforismo/ants/internal/fixtures"
+	"github.com/metaforismo/ants/internal/server"
 )
 
 // TestStartRunOnlyEnqueues pins the ADR-0012 part 2 lifecycle contract: the
@@ -196,38 +200,79 @@ func TestMissingIdempotencyKeyRejected(t *testing.T) {
 	}
 }
 
+// TestAuthEnforcement pins the refusal contract at the authentication seam:
+// absent credentials, unknown tenants, and malformed principals all yield
+// uniform 401 problems, and a bearer-protected server advertises the scheme
+// only when OIDC is configured.
 func TestAuthEnforcement(t *testing.T) {
 	e := newEnv(t)
 
-	// No headers at all.
+	problem := func(raw []byte) string {
+		var p struct {
+			Code string `json:"code"`
+		}
+		if err := json.Unmarshal(raw, &p); err != nil {
+			t.Fatalf("refusals must be problem details: %s", raw)
+		}
+		return p.Code
+	}
+
+	// No credentials at all.
 	status, _, raw := e.do(http.MethodGet, "/v1/projects", map[string]string{}, "")
 	if status != http.StatusUnauthorized {
 		t.Fatalf("unauthenticated request must be 401, got %d (%s)", status, raw)
 	}
-	// Unknown tenant slug.
+	if code := problem(raw); code != "missing_bearer_token" {
+		t.Fatalf("missing credential must be typed missing_bearer_token, got %s", code)
+	}
+	// Unknown tenant inside an otherwise well-formed credential.
 	status, _, _ = e.do(http.MethodGet, "/v1/projects", e.headers("nope-nope-nope"), "")
 	if status != http.StatusUnauthorized {
 		t.Fatalf("unknown tenant must be 401, got %d", status)
 	}
 	// Invalid principal format.
-	badHeaders := e.headers(e.tenantAS)
-	badHeaders["X-Ants-Dev-Principal"] = "not-an-id"
-	status, _, _ = e.do(http.MethodGet, "/v1/projects", badHeaders, "")
+	badHeaders := map[string]string{
+		"Authorization": "Bearer " + e.tenantAS + ":not-an-id",
+	}
+	status, _, raw = e.do(http.MethodGet, "/v1/projects", badHeaders, "")
 	if status != http.StatusUnauthorized {
 		t.Fatalf("invalid principal must be 401, got %d", status)
 	}
+	if code := problem(raw); code != "invalid_principal" {
+		t.Fatalf("invalid principal must be typed invalid_principal, got %s", code)
+	}
 }
 
+// TestUnconfiguredAuthRefusesEverything pins the ADR-0004 posture with no
+// identity provider wired: every authenticated route answers
+// authentication_not_configured and no WWW-Authenticate challenge is offered,
+// because there is no scheme to honor.
 func TestUnconfiguredAuthRefusesEverything(t *testing.T) {
 	cfg := config.Defaults()
-	cfg.Server.DevHeaderAuth = false
 	application := buildApp(t, cfg)
-	ts := buildServer(t, cfg, application)
+	srv, err := server.New(server.Deps{
+		Config:  cfg,
+		Repos:   application.Repos,
+		Auth:    server.UnconfiguredAuthenticator{},
+		Uow:     application.Uow,
+		Engine:  application.Engine,
+		Logger:  slog.New(slog.NewTextHandler(io.Discard, nil)),
+		Ready:   application.Ready,
+		Metrics: application.Metrics,
+	})
+	if err != nil {
+		t.Fatalf("build server: %v", err)
+	}
+	ts := httptest.NewServer(srv.Handler())
+	t.Cleanup(ts.Close)
 
 	e := &env{t: t, baseURL: ts.URL}
-	status, _, raw := e.do(http.MethodGet, "/v1/projects", nil, "")
+	status, hdr, raw := e.do(http.MethodGet, "/v1/projects", nil, "")
 	if status != http.StatusUnauthorized {
-		t.Fatalf("dev auth disabled must refuse requests, got %d (%s)", status, raw)
+		t.Fatalf("unconfigured auth must refuse requests, got %d (%s)", status, raw)
+	}
+	if challenge := hdr.Get("WWW-Authenticate"); challenge != "" {
+		t.Fatalf("unconfigured server must not advertise a bearer challenge, got %q", challenge)
 	}
 	var problem struct {
 		Code string `json:"code"`

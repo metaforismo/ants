@@ -38,6 +38,21 @@ dependencies:
       later wave and can scrape this registry, so the choice is not
       foreclosed.
 
+  - module: github.com/lestrrat-go/jwx/v2
+    version: v2.1.7
+    license: MIT
+    decision: adopt
+    purpose: JWS/JWK/JWT parsing primitives for the OIDC resource-server
+      verifier (ADR-0019) — signature verification with strict kid+alg key
+      selection and JWKS document parsing. Discovery validation, key-cache
+      lifecycle, rotation policy, and claim mapping stay in internal/authn.
+    notes: The master-plan OSS atlas (section 14.4) listed lestrrat-go/jwx
+      for evaluation in exactly this role. Actively maintained, widely
+      deployed, purpose-built JOSE stack; adopting it avoids hand-rolled
+      signature/key-selection code where algorithm-confusion bugs live.
+      Hand-rolling was rejected per ADR-0008 (reuse mature components for
+      security-critical primitives).
+
   - module: openapi-typescript (npm, packages/contracts devDependency)
     version: 7.13.0
     license: MIT
