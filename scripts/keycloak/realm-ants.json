@@ -1,7 +1,7 @@
 {
   "realm": "ants",
   "enabled": true,
-  "sslRequired": "external",
+  "sslRequired": "none",
   "accessTokenLifespan": 900,
   "clients": [
     {

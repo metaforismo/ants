@@ -5,7 +5,10 @@
 #
 # The realm is imported from a versioned JSON file, so the fixture needs no
 # external account and no manual console steps. Client secrets in it are
-# fixture-only values for a loopback-bound throwaway realm.
+# fixture-only values for a loopback-bound throwaway realm; the realm sets
+# sslRequired "none" because the container only ever sees Docker-NAT source
+# addresses (never the client's loopback), and the published port is bound
+# to 127.0.0.1 on the host.
 #
 # Usage: scripts/test-keycloak.sh [keep]
 set -eu
@@ -24,8 +27,10 @@ cleanup() {
 }
 
 docker rm -f "$CONTAINER" >/dev/null 2>&1 || true
+# The published port is bound to host loopback only: the fixture realm is a
+# throwaway with plaintext HTTP, and it must never listen beyond this machine.
 docker run -d --name "$CONTAINER" \
-  -p "$PORT":8080 \
+  -p "127.0.0.1:$PORT":8080 \
   -v "$PWD/scripts/keycloak/realm-ants.json":/opt/keycloak/data/import/realm-ants.json:ro \
   -e KEYCLOAK_ADMIN=fixture-admin -e KEYCLOAK_ADMIN_PASSWORD=fixture-admin-password \
   "$IMAGE" start-dev --import-realm >/dev/null

@@ -337,6 +337,100 @@ func TestKeycloakUserTokensMapToStablePrincipals(t *testing.T) {
 	}
 }
 
+// TestKeycloakCrossTenantIsolation proves ADR-0004's uniform-404 rule under
+// real provider signatures: a token whose verified tenant claim names one
+// tenant gets neither visibility nor existence hints about another tenant's
+// resources — refusals are the same not-found problems a nonexistent id
+// would produce, never a 403 oracle or leaked identifier.
+func TestKeycloakCrossTenantIsolation(t *testing.T) {
+	issuer := requireKeycloak(t)
+	e := newOIDCEnv(t, issuer)
+	acme := clientCredentials(t, issuer, "acme-service", "fixture-acme-secret")
+	other := clientCredentials(t, issuer, "other-service", "fixture-other-secret")
+
+	status, _, raw := e.do(http.MethodPost, "/v1/projects", acme,
+		fmt.Sprintf(`{"slug":"iso-acme","name":"Iso","default_branch":"main","seed_name":"%s"}`, fixtures.DemoName))
+	if status != http.StatusCreated {
+		t.Fatalf("acme project creation: %d (%s)", status, raw)
+	}
+	var project struct {
+		ID string `json:"id"`
+	}
+	_ = json.Unmarshal(raw, &project)
+	status, _, raw = e.do(http.MethodPost, "/v1/threads", acme,
+		fmt.Sprintf(`{"project_id":%q,"title":"isolation"}`, project.ID))
+	if status != http.StatusCreated {
+		t.Fatalf("acme thread creation: %d (%s)", status, raw)
+	}
+	var thread struct {
+		ID string `json:"id"`
+	}
+	_ = json.Unmarshal(raw, &thread)
+
+	// The foreign list must not carry acme's project at all.
+	status, _, raw = e.do(http.MethodGet, "/v1/projects", other, "")
+	if status != http.StatusOK {
+		t.Fatalf("foreign project list: %d (%s)", status, raw)
+	}
+	if strings.Contains(string(raw), project.ID) || strings.Contains(string(raw), "iso-acme") {
+		t.Fatalf("another tenant's identifiers must not appear in a foreign list: %s", raw)
+	}
+
+	// Direct probes against acme's ids are uniform 404s for the other
+	// tenant — indistinguishable from missing resources.
+	for _, probe := range []struct {
+		name   string
+		method string
+		path   string
+		body   string
+	}{
+		{"thread read", http.MethodGet, "/v1/threads/" + thread.ID, ""},
+		{"message append", http.MethodPost, "/v1/threads/" + thread.ID + "/messages", `{"content":"intrusion"}`},
+		{"run start", http.MethodPost, "/v1/threads/" + thread.ID + "/runs", "{}"},
+	} {
+		probe := probe
+		t.Run(probe.name, func(t *testing.T) {
+			status, _, raw := e.doWithCorrelationNamed(probe.method, probe.path, other, probe.body, "req_iso-"+probe.name)
+			if status != http.StatusNotFound {
+				t.Fatalf("%s from a foreign tenant must be a uniform 404, got %d (%s)", probe.name, status, raw)
+			}
+			if code := problemCode(t, raw); code != "thread_not_found" {
+				t.Fatalf("uniform not-found problem expected, got %q", code)
+			}
+		})
+	}
+}
+
+// doWithCorrelationNamed issues an authenticated request carrying an explicit
+// X-Request-ID (start-run requires it to be paired with an Idempotency-Key,
+// which is derived here so isolation probes stay independent).
+func (e *oidcEnv) doWithCorrelationNamed(method, path, token, body, name string) (int, http.Header, []byte) {
+	e.t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+	var reader io.Reader
+	if body != "" {
+		reader = strings.NewReader(body)
+	}
+	req, err := http.NewRequestWithContext(ctx, method, e.baseURL+path, reader)
+	if err != nil {
+		e.t.Fatal(err)
+	}
+	if token != "" {
+		req.Header.Set("Authorization", "Bearer "+token)
+	}
+	req.Header.Set("X-Request-ID", name)
+	req.Header.Set("Idempotency-Key", "iso-"+name)
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		e.t.Fatalf("%s %s: %v", method, path, err)
+	}
+	defer resp.Body.Close()
+	raw := readAll(e.t, resp)
+	return resp.StatusCode, resp.Header, raw
+}
+
 // TestKeycloakExpiryViaShiftedClock proves expiry enforcement against REAL
 // IdP-signed tokens without sleeps or short-lived fixtures: a verifier whose
 // clock sits beyond a valid token's exp must refuse with token_expired while
