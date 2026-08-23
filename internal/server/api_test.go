@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"log/slog"
 	"net/http"
@@ -371,6 +372,139 @@ type runPage struct {
 	Total int64 `json:"total"`
 }
 
+// TestListThreadRunsPaginationReachesTrueLatest pins the accepted fix for
+// the release-blocking defect behind the console's reattachment claim: a
+// single bounded first page does NOT contain the newest run once history
+// outgrows the server page size (the pre-fix reproduction failed exactly
+// there), so clients must walk positional pages through the authoritative
+// total and take the last item of the final page as the true latest. This
+// test walks those pages black-box style: the server page size is derived
+// from the first response instead of duplicating internal constants.
+func TestListThreadRunsPaginationReachesTrueLatest(t *testing.T) {
+	// Comfortably above the server's bounded default page; if that limit is
+	// ever raised past this seed count, the tripwire below forces this test
+	// to be revisited consciously rather than silently passing.
+	const seeded = 205
+	e := newEnv(t)
+	_, threadID := e.seedProjectThread(e.tenantAS)
+
+	base := time.Now().UTC().Add(-seeded * time.Second)
+	ids := make([]string, 0, seeded)
+	for i := 0; i < seeded; i++ {
+		ids = append(ids, e.seedRunAt(t, e.tenantAS, threadID, base.Add(time.Duration(i)*time.Second)))
+	}
+	newest := ids[seeded-1]
+
+	var first runPage
+	e.doJSON(t, http.MethodGet, "/v1/threads/"+threadID+"/runs", e.tenantAS, nil, &first, http.StatusOK)
+	if first.Runs == nil {
+		t.Fatalf("runs must be an array, never null")
+	}
+	if first.Total != seeded {
+		t.Fatalf("total must count every recorded run: got %d, want %d", first.Total, seeded)
+	}
+	pageSize := len(*first.Runs)
+	if pageSize == 0 || int64(pageSize) >= first.Total {
+		t.Fatalf("tripwire: server page limit no longer produces multiple pages for %d seeded runs (page length %d); raise the seed count", seeded, pageSize)
+	}
+	if (*first.Runs)[0].ID != ids[0] {
+		t.Fatalf("oldest-first contract drifted: first page starts at %s, want %s", (*first.Runs)[0].ID, ids[0])
+	}
+
+	// Walk pages exactly like the console helper: resume at the count of
+	// consumed entries until the authoritative total is exhausted.
+	collected := map[string]bool{}
+	order := make([]string, 0, seeded)
+	for _, r := range *first.Runs {
+		collected[r.ID] = true
+		order = append(order, r.ID)
+	}
+	for cursor := int64(pageSize); int64(len(collected)) < first.Total; cursor = int64(len(collected)) {
+		var page runPage
+		e.doJSON(t, http.MethodGet,
+			fmt.Sprintf("/v1/threads/%s/runs?after=%d", threadID, cursor),
+			e.tenantAS, nil, &page, http.StatusOK)
+		if page.Runs == nil {
+			t.Fatalf("resume page after=%d must be an array, never null", cursor)
+		}
+		if page.Total != seeded {
+			t.Fatalf("stable pagination must keep total at %d across pages, got %d at after=%d", seeded, page.Total, cursor)
+		}
+		for _, r := range *page.Runs {
+			if collected[r.ID] {
+				t.Fatalf("positional oldest-first pages must never overlap: duplicate %s at after=%d", r.ID, cursor)
+			}
+			collected[r.ID] = true
+			order = append(order, r.ID)
+		}
+	}
+	if len(collected) != seeded {
+		t.Fatalf("walked pages must cover every run exactly once: saw %d of %d", len(collected), seeded)
+	}
+	if order[len(order)-1] != newest {
+		t.Fatalf("true latest run must be the final item of the final page: got %s, want %s", order[len(order)-1], newest)
+	}
+}
+
+// TestListThreadRunsCursorGrammar pins the shared `after` grammar at the
+// HTTP boundary for every list endpoint that takes it (thread runs, thread
+// messages, run events): omitted defaults to 0, an explicit 0 is accepted,
+// and everything outside the OpenAPI schema — repeated parameters, explicit
+// empties, whitespace or sign padding, negatives, non-digits, values beyond
+// int64 — is a typed invalid_cursor problem instead of a silent fallback.
+func TestListThreadRunsCursorGrammar(t *testing.T) {
+	e := newEnv(t)
+	_, threadID := e.seedProjectThread(e.tenantAS)
+	runID := e.startRun(t, threadID)
+
+	endpoints := map[string]string{
+		"runs":     "/v1/threads/" + threadID + "/runs",
+		"messages": "/v1/threads/" + threadID + "/messages",
+		"events":   "/v1/runs/" + runID + "/events",
+	}
+
+	accepted := map[string]string{
+		"omitted":      "",
+		"explicitzero": "?after=0",
+	}
+	for name, endpoint := range endpoints {
+		for caseName, query := range accepted {
+			status, _, raw := e.do(http.MethodGet, endpoint+query, e.headers(e.tenantAS), "")
+			if status != http.StatusOK {
+				t.Errorf("%s: %s cursor must be accepted with 200, got %d (%s)", name, caseName, status, raw)
+			}
+		}
+	}
+
+	rejected := map[string]string{
+		"empty":       "?after=",
+		"leadspace":   "?after=%201",
+		"trailspace":  "?after=1%20",
+		"plussign":    "?after=%2B1",
+		"negative":    "?after=-1",
+		"malformed":   "?after=abc",
+		"float":       "?after=1.5",
+		"overflow":    "?after=99999999999999999999",
+		"maxoverflow": "?after=9223372036854775808",
+		"repeated":    "?after=1&after=2",
+	}
+	for name, endpoint := range endpoints {
+		for caseName, query := range rejected {
+			status, _, raw := e.do(http.MethodGet, endpoint+query, e.headers(e.tenantAS), "")
+			if status != http.StatusBadRequest {
+				t.Errorf("%s: %s cursor must be rejected with 400, got %d (%s)", name, caseName, status, raw)
+				continue
+			}
+			var problem struct {
+				Code string `json:"code"`
+			}
+			if err := json.Unmarshal(raw, &problem); err != nil || problem.Code != "invalid_cursor" {
+				t.Errorf("%s: %s cursor rejection must be typed invalid_cursor: %s", name, caseName, raw)
+			}
+		}
+	}
+}
+
 // TestListThreadRuns pins the read contract the web console uses to discover
 // and reattach to a thread's runs: stable oldest-first order, cursor
 // pagination boundaries, an explicit empty page for a runless thread,
@@ -404,7 +538,8 @@ func TestListThreadRuns(t *testing.T) {
 		}
 	}
 
-	// The second page resumes exactly after the first entry of the stable order.
+	// The second page resumes exactly after the first entry of the stable
+	// oldest-first order, reaching strictly newer runs.
 	var tail runPage
 	e.doJSON(t, http.MethodGet, "/v1/threads/"+threadID+"/runs?after=1", e.tenantAS, nil, &tail, http.StatusOK)
 	if tail.Runs == nil || len(*tail.Runs) != 2 || (*tail.Runs)[0].ID != runB || tail.Total != 3 {

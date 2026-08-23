@@ -161,12 +161,17 @@ export interface paths {
         /**
          * List the runs of a thread
          * @description Runs are returned oldest first in one stable order (creation time,
-         *     ties broken by ascending id) so pages never reshuffle between
-         *     requests. The `after` cursor is the number of runs to skip from the
-         *     start of that order; runs are never deleted, so positions are
-         *     stable. A known thread without runs yields an empty `runs` array,
-         *     never an error; an unknown or foreign-tenant thread yields the
-         *     uniform 404 problem (no existence oracle, ADR-0004).
+         *     ties broken by ascending id). Runs are never deleted and new runs
+         *     arrive only at the tail, so positions never reshuffle: pages fetched
+         *     with increasing `after` cursors never duplicate or skip, even when
+         *     concurrent starts grow `total` between page requests. The newest run
+         *     is therefore the last item of the final page, not of the first one —
+         *     clients wanting the true latest must walk pages until they have
+         *     consumed `total` entries (the console does exactly this; it must not
+         *     assume any single bounded page holds the latest run). A known thread
+         *     without runs yields an empty `runs` array, never an error; an unknown
+         *     or foreign-tenant thread yields the uniform 404 problem (no existence
+         *     oracle, ADR-0004).
          */
         get: operations["listThreadRuns"];
         put?: never;
@@ -588,7 +593,15 @@ export interface components {
         RunID: components["schemas"]["RunID"];
         TaskID: components["schemas"]["TaskID"];
         ArtifactID: components["schemas"]["ArtifactID"];
-        /** @description Return entries with cursor strictly greater than this value */
+        /**
+         * @description Return entries at positions strictly greater than this value in the
+         *     stable oldest-first order. The grammar is exactly this schema
+         *     (integer, minimum 0, default 0): omitted means 0; a present value
+         *     must be a single decimal-digit integer (no sign, whitespace, or
+         *     other padding) within the int64 range. Repeated, empty, or malformed
+         *     values are rejected with problem code `invalid_cursor` rather than
+         *     silently falling back to the default.
+         */
         AfterCursor: number;
     };
     requestBodies: never;
@@ -809,7 +822,15 @@ export interface operations {
     listThreadMessages: {
         parameters: {
             query?: {
-                /** @description Return entries with cursor strictly greater than this value */
+                /**
+                 * @description Return entries at positions strictly greater than this value in the
+                 *     stable oldest-first order. The grammar is exactly this schema
+                 *     (integer, minimum 0, default 0): omitted means 0; a present value
+                 *     must be a single decimal-digit integer (no sign, whitespace, or
+                 *     other padding) within the int64 range. Repeated, empty, or malformed
+                 *     values are rejected with problem code `invalid_cursor` rather than
+                 *     silently falling back to the default.
+                 */
                 after?: components["parameters"]["AfterCursor"];
             };
             header?: never;
@@ -865,8 +886,16 @@ export interface operations {
     listThreadRuns: {
         parameters: {
             query?: {
-                /** @description Return runs at position strictly greater than this value in the stable order */
-                after?: number;
+                /**
+                 * @description Return entries at positions strictly greater than this value in the
+                 *     stable oldest-first order. The grammar is exactly this schema
+                 *     (integer, minimum 0, default 0): omitted means 0; a present value
+                 *     must be a single decimal-digit integer (no sign, whitespace, or
+                 *     other padding) within the int64 range. Repeated, empty, or malformed
+                 *     values are rejected with problem code `invalid_cursor` rather than
+                 *     silently falling back to the default.
+                 */
+                after?: components["parameters"]["AfterCursor"];
             };
             header?: never;
             path: {
@@ -943,7 +972,15 @@ export interface operations {
     listRunEvents: {
         parameters: {
             query?: {
-                /** @description Return entries with cursor strictly greater than this value */
+                /**
+                 * @description Return entries at positions strictly greater than this value in the
+                 *     stable oldest-first order. The grammar is exactly this schema
+                 *     (integer, minimum 0, default 0): omitted means 0; a present value
+                 *     must be a single decimal-digit integer (no sign, whitespace, or
+                 *     other padding) within the int64 range. Repeated, empty, or malformed
+                 *     values are rejected with problem code `invalid_cursor` rather than
+                 *     silently falling back to the default.
+                 */
                 after?: components["parameters"]["AfterCursor"];
             };
             header?: never;
