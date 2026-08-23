@@ -21,12 +21,12 @@ changes.
 |---|---|---|---|
 | R1 | Retention semantics decided against plan + ADRs and recorded; inert unless intentionally configured; distinct delivered/discarded horizons justified; pending/leased/dead/events/audit permanently out of reach | `docs/adr/0016-outbox-retention-gc.md`; zero-horizon exemption enforced in the port itself (`ports.RetentionSweepRequest` docs + adapter guards) | `TestDefaultsValidate` pins inert defaults; storetest `ZeroHorizonExemptsItsClassEntirely`; `SweepDeletesOnlyEligibleTerminalRowsBeyondHorizon`; PG `TestRetentionNeverDeletesRowsWithoutTerminalTimestamp` |
 | R2 | Explicit nonzero horizons + batch limits through the existing config system with validation/defaults/env overrides | `config.OutboxRetention` (+Validate/Active), env vars `ANTS_OUTBOX_RETENTION_*`, example YAML section | config tests incl. negative horizon / bad batch / bad interval cases in `TestValidationFailures`; unknown-env guard covers new vars automatically |
-| R3 | Domain/ports model: bounded request/result, store-owned cutoff, durations-only requests, DryRun sharing the sweep's selection logic, typed invalid failures; no raw SQL/envelopes across the port | `internal/ports/outboxretention.go`; `OutboxStore.SweepRetention` | storetest `InvalidRequestsAreRejected`, `ResultCutoffIsTheStoreClockInstant`; CLI `TestSweepJSONOutputIsTyped` (result JSON shape) |
-| R4 | Parity in memory + PostgreSQL via one shared behavioral suite: deterministic oldest-first bounded deletion, only eligible terminal rows beyond horizon, strict inclusive boundary, concurrency safety, idempotent reruns, UoW rollback parity, global-round scoping | memory `SweepRetention` (`internal/store/memory/outbox.go`); PG `SweepRetention` + victim DELETE/SELECT helpers (`internal/store/postgres/outbox.go`) | `storetest.RunOutboxRetention` (10 subtests) wired into both `TestMemoryOutboxRetentionContract` and `TestPostgresStoreContract`; within-class order pinned per adapter by `TestRetentionOldestFirstVictimOrder` (PG) and class-priority subtest (shared) |
+| R3 | Domain/ports model: bounded request/result, store-owned cutoff, durations-only requests, DryRun sharing the sweep's selection logic AND budget allocation, typed invalid failures; no raw SQL/envelopes across the port | `internal/ports/outboxretention.go`; `OutboxStore.SweepRetention` | storetest `InvalidRequestsAreRejected`, `ResultCutoffIsTheStoreClockInstant`, `DryRunAppliesTheSameClassPriorityAndBudgetAsSweep`; CLI `TestSweepJSONOutputIsTyped` (result JSON shape) |
+| R4 | Parity in memory + PostgreSQL via one shared behavioral suite: deterministic bounded deletion (delivered victims first, oldest-terminal-first within each class), only eligible terminal rows beyond horizon, strict inclusive boundary, concurrency safety, idempotent reruns, UoW rollback parity, global-round scoping | memory `SweepRetention` (`internal/store/memory/outbox.go`); PG `SweepRetention` + victim DELETE/bounded-COUNT helpers (`internal/store/postgres/outbox.go`) | `storetest.RunOutboxRetention` (11 subtests) wired into both `TestMemoryOutboxRetentionContract` and `TestPostgresStoreContract`; within-class order pinned per adapter by `TestRetentionOldestFirstVictimOrder` (PG) and class-priority subtests (shared) |
 | R5 | Single bounded atomic deletion strategy with index support in forward-only migration 0008 | migration `db/migrations/0008_outbox_retention.sql` (two partial indexes); PG round wrapped in one unit of work, victims via `FOR UPDATE SKIP LOCKED … LIMIT`, truthful `RETURNING` counts | `TestRetentionIndexesExist`; migrate integration suite applies 0001–0008 idempotently; full contract suite against real PG16 |
 | R6 | Application/service seam performing one GC round without violating dispatcher/operator invariants; scheduling decision recorded | `internal/outboxgc/service.go` (`Preview/Round/Run/Active`); serve lifecycle starts the loop only when a horizon is configured and stops it FIRST during shutdown (`internal/cli/cli.go`); rationale in ADR-0016 "Scheduling" | outboxgc tests: construction validation, preview purity, bounded round + observer truthfulness, nil observer, inactive refusal, cancel-stop; live smoke: scheduled loop collects rows, SIGTERM shutdown exits 0 |
 | R7 | Metrics only as a reviewed amendment to ADR-0014's closed set; fixed vocabularies; no identifiers as labels; metrics cannot alter behavior | `metrics.Metrics.Deleted/RoundsCompleted` implementing `outboxgc.Observer` structurally; ADR-0014 amendment paragraph | `wantNames` pin + label assertions in `metrics_test.go`; outboxgc `TestNilObserverKeepsBehaviorIdentical`; previews never fire observers (`TestPreviewReportsWithoutDeletingOrObserving`) |
-| R8 | CLI/operator UX: dry-run preview, unambiguous --yes gate with proof nothing is deleted when omitted, stable output/JSON, typed error triples, exit codes 0/1/2, config path support | `runOutboxRetention/runRetentionSweep/retentionSweep` (`internal/cli/outbox.go`); refusal prints real preview numbers computed non-destructively | cli tests: `TestUnconfirmedSweepRefusesWithUsageExit`, `TestConfirmedSweepDeletesEligibleTerminalRowsOnly`, `TestRetentionPreviewReportsWithoutDeleting`, `TestRetentionIsInertByDefault`, `TestSweepJSONOutputIsTyped`; live smoke re-proves the gate end-to-end |
+| R8 | CLI/operator UX: dry-run preview, unambiguous --yes gate with proof nothing is deleted when omitted, stable output/JSON, typed error triples, exit codes 0/1/2, config path support | `runOutboxRetention/runRetentionSweep/retentionSweep` (`internal/cli/outbox.go`); the gate lives in `retentionSweep` before any mutation path and its refusal prints real preview numbers computed non-destructively | cli tests: `TestUnconfirmedSweepRefusesWithUsageExit` (exit 2 through full arg parsing AND zero mutation against a seeded world with aged eligible rows), `TestConfirmedSweepDeletesEligibleTerminalRowsOnly`, `TestRetentionPreviewReportsWithoutDeleting`, `TestRetentionIsInertByDefault`, `TestSweepJSONOutputIsTyped`; live smoke re-proves the gate end-to-end |
 | R9 | Runbook, README/SECURITY posture, evidence with honest status, rollback/recovery implications, latest-evidence pointer | `docs/runbooks/outbox-operations.md` retention section; README status + pointer swap to this file; SECURITY.md structural guarantees | human-reviewed; commands below are copy-paste reproducible |
 
 ## Design decisions worth knowing (full rationale in ADR-0016)
@@ -44,6 +44,41 @@ changes.
 - **Serve stops the GC loop FIRST** during graceful shutdown: destructive
   maintenance never competes with worker/dispatcher drains, and skipping one
   atomic round is always safe.
+
+## Independent review pass (post-first-session audit)
+
+A second reviewer audited the full diff against ADR-0016 and the port
+contract without trusting the first session. Findings and fixes, all landed
+on this branch:
+
+- **F1 — PostgreSQL preview was unbounded and horizon-blind (fixed):**
+  `countRetainable` ran a plain `COUNT(*)` over ALL eligible rows and the
+  DryRun path ignored horizons entirely, so with 5 eligible rows and
+  `Limit=4` a preview reported `{3 delivered, 2 discarded}` where a real
+  sweep deletes exactly `{3,1}`, and a zero-horizon preview COUNTED the
+  exempt class. The preview now applies the sweep's exact budget allocation
+  (delivered first up to remaining budget, then discarded) and each count is
+  capped at its budget via `LIMIT` inside the COUNT subquery, so preview
+  work is O(limit), never O(backlog). Proven: with the old adapter restored,
+  the new shared subtests fail against real PG16 (`{3,2}` and exempt-class
+  counting); with the fix they pass on both adapters.
+- **F2 — new contract regressions added:** `DryRunAppliesTheSameClassPriority
+  AndBudgetAsSweep` (eligible rows exceed Limit, both classes compete;
+  preview must equal a real sweep round-for-round) and DryRun assertions in
+  `ZeroHorizonExemptsItsClassEntirely`. Suite grew from 10 to 11 subtests.
+- **F3 — raw driver errors from `rows.Err()`** in the new
+  `deleteRetainableBatch` bypassed the error taxonomy; now classified via
+  `wrapScan` like every sibling path.
+- **F4 — "oldest-first" wording reconciled with actual semantics.** No plan
+  text requires a global oldest-first scan; the implemented and intended
+  semantics are class priority (delivered budget first) with per-class
+  oldest-terminal consumption. ADR-0016 heading, port docs, adapter/service
+  comments, README, migration comment, and example YAML now say exactly
+  that; the runbook already did.
+- **F5 — confirmation-gate moved into `retentionSweep`'s core**, so the gate
+  is exercised against a seeded world: `TestUnconfirmedSweepRefusesWithUsage
+  Exit` now proves exit 2 AND zero mutation with aged eligible rows present,
+  not just on an empty store.
 
 ## Audit/deslop findings this session
 
@@ -84,6 +119,33 @@ changes.
 | Build | `make build` | PASS (bin/ants, bin/ants-api) |
 | Demo | `make demo` | PASS |
 | Live e2e smoke | disposable ants-smoke-pg (postgres:16-alpine), real `bin/ants` binary; scratch under repo-local `.local/`, removed afterwards; container removed afterwards | PASS (all checks listed below) |
+
+### Re-run after the independent review pass (exact commands and exit codes, final code state)
+
+Every gate was re-executed to completion after findings F1–F5 landed;
+exit codes were captured directly from each command (never inferred from
+piped output), with logs under repo-local gitignored `.local/`:
+
+| Gate | Command | Exit |
+|---|---|---|
+| Format | `gofmt -l .` | 0 (no output) |
+| Vet | `go vet ./...` | 0 |
+| Lint | `STATICCHECK_CACHE=$PWD/.local/staticcheck-cache go run honnef.co/go/tools/cmd/staticcheck@2026.2.1 ./...` | 0 |
+| Tidy idempotence | `go mod tidy && git diff --exit-code -- go.mod go.sum` | 0 |
+| Manifest | `go run ./scripts/manifestcheck` | 0 |
+| Unit | `go test ./...` | 0 |
+| Race | `go test -race ./...` | 0 |
+| Focused stress | `go test -race -count=60 ./internal/store/storetest/ ./internal/outboxgc/ ./internal/outboxops/ ./internal/cli/ ./internal/store/memory/` | 0 (benign macOS LC_DYSYMTAB linker warnings only) |
+| PG16 integration | `./scripts/test-postgres.sh` (disposable postgres:16-alpine; migrate up 0001–0008 + full contract suite incl. the new DryRun-budget subtests) | 0 |
+| Full CI | `STATICCHECK_CACHE=… make ci` (cache redirect required by this sandbox's unwritable `~/Library/Caches`; lint also passes standalone) | 0 |
+| Build | `make build` | 0 |
+| Demo | `make demo` | 0 |
+
+Regression-meaningfulness proof for F1: with the pre-fix PostgreSQL adapter
+temporarily restored, `go test -run TestPostgresStoreContract` against a real
+PG16 container fails exactly the two new subtests (`DryRunApplies…` reports
+`{3,2}`, `ZeroHorizonExempts…` dry-run counts the exempt class); with the fix
+restored the same command exits 0.
 
 ## Live end-to-end smoke (all PASS)
 
@@ -144,8 +206,8 @@ and were deleted; the container was removed afterwards.
 ## NOT RUN / BLOCKED
 
 None. Every gate above executed to completion in this session against the
-final code state. Push/PR steps were performed immediately after this record
-was written.
+final code state (see the re-run table for the post-review pass). Push/PR
+steps were performed immediately after this record was updated.
 
 ## Prompt for PR 3.4 (next tranche, from the master plan)
 

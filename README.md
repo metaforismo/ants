@@ -20,9 +20,10 @@ and restarts or terminally discards them under a compare-and-swap fencing
 credential, with every intervention committed as event + delivery + audit in
 one unit of work (ADR-0015). Retention is bounded and explicit: terminal
 rows (`delivered`, `discarded`) are collected by configured horizons in
-atomic oldest-first rounds — never pending, leased, or dead rows, and never
-events or audit history — through `ants outbox retention preview/sweep` and,
-optionally, a scheduled loop (ADR-0016).
+atomic rounds — delivered victims first, oldest-terminal-first within each
+class; never pending, leased, or dead rows, and never events or audit
+history — through `ants outbox retention preview/sweep` and, optionally, a
+scheduled loop (ADR-0016).
 
 Read the [master plan](docs/MASTER_PLAN.md) for the complete product and implementation strategy. The condensed [resources index](docs/RESOURCES.md) links directly to the repositories, documentation, papers, and product research that accelerate development. Architecture decisions live in [docs/adr](docs/adr); the current implementation state and its proof matrix live in [docs/TRANCHE_3_3_EVIDENCE.md](docs/TRANCHE_3_3_EVIDENCE.md), with per-tranche records alongside (latest: [Tranche 3.3 outbox retention/GC](docs/TRANCHE_3_3_EVIDENCE.md)).
 

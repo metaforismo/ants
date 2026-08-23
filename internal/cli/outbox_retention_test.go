@@ -82,7 +82,7 @@ func TestRetentionPreviewReportsWithoutDeleting(t *testing.T) {
 	ageRows(t)
 
 	var stdout, stderr bytes.Buffer
-	if code := retentionSweep(f.app, false, false, &stdout, &stderr); code != exitOK {
+	if code := retentionSweep(f.app, false, false, false, &stdout, &stderr); code != exitOK {
 		t.Fatalf("preview exit = %d, stderr=%s", code, stderr.String())
 	}
 	line := stdout.String()
@@ -100,13 +100,13 @@ func TestRetentionIsInertByDefault(t *testing.T) {
 	f.seedDeliveredRow(t, "obx_evt_retinert_d")
 
 	var stdout, stderr bytes.Buffer
-	if code := retentionSweep(f.app, false, false, &stdout, &stderr); code != exitOK {
+	if code := retentionSweep(f.app, false, false, false, &stdout, &stderr); code != exitOK {
 		t.Fatalf("preview exit = %d", code)
 	}
 	if !strings.Contains(stdout.String(), "delivered=0 discarded=0") {
 		t.Fatalf("inert defaults must report nothing eligible: %q", stdout.String())
 	}
-	if code := retentionSweep(f.app, true, false, &stdout, &stderr); code != exitOK {
+	if code := retentionSweep(f.app, true, true, false, &stdout, &stderr); code != exitOK {
 		t.Fatalf("confirmed sweep under inert defaults must still succeed: %d", code)
 	}
 	stats, _ := f.app.Repos.Outbox.Stats(context.Background())
@@ -115,6 +115,11 @@ func TestRetentionIsInertByDefault(t *testing.T) {
 	}
 }
 
+// TestUnconfirmedSweepRefusesWithUsageExit drives the real gate twice: once
+// through full arg parsing (no rows, proves the exit contract) and once
+// against a seeded world with aged eligible rows present (proves the refusal
+// mutates nothing and reports the true preview numbers it declined to act
+// on).
 func TestUnconfirmedSweepRefusesWithUsageExit(t *testing.T) {
 	var stdout, stderr bytes.Buffer
 	code := runOutboxRetention([]string{"sweep"}, &stdout, &stderr)
@@ -128,6 +133,26 @@ func TestUnconfirmedSweepRefusesWithUsageExit(t *testing.T) {
 	if stdout.Len() != 0 {
 		t.Fatalf("failures must keep stdout clean: %q", stdout.String())
 	}
+
+	f := newRetentionFixture(t)
+	ctx := context.Background()
+	f.seedDeliveredRow(t, "obx_evt_refusal_d")
+	f.seedDiscardedRow(t, "obx_evt_refusal_c")
+	ageRows(t)
+
+	stdout.Reset()
+	stderr.Reset()
+	code = retentionSweep(f.app, true, false, false, &stdout, &stderr)
+	if code != exitUsage {
+		t.Fatalf("unconfirmed sweep with victims must still exit usage, got %d", code)
+	}
+	if !strings.Contains(stderr.String(), "1 delivered and 1 discarded") {
+		t.Fatalf("refusal must show the real preview numbers: %q", stderr.String())
+	}
+	stats, err := f.app.Repos.Outbox.Stats(ctx)
+	if err != nil || stats.Delivered != 1 || stats.Discarded != 1 {
+		t.Fatalf("unconfirmed sweep must delete zero rows: %+v %v", stats, err)
+	}
 }
 
 func TestConfirmedSweepDeletesEligibleTerminalRowsOnly(t *testing.T) {
@@ -140,7 +165,7 @@ func TestConfirmedSweepDeletesEligibleTerminalRowsOnly(t *testing.T) {
 	ageRows(t)
 
 	var stdout, stderr bytes.Buffer
-	if code := retentionSweep(f.app, true, false, &stdout, &stderr); code != exitOK {
+	if code := retentionSweep(f.app, true, true, false, &stdout, &stderr); code != exitOK {
 		t.Fatalf("confirmed sweep exit = %d, stderr=%s", code, stderr.String())
 	}
 	line := stdout.String()
@@ -161,7 +186,7 @@ func TestSweepJSONOutputIsTyped(t *testing.T) {
 	f := newRetentionFixture(t)
 
 	var stdout, stderr bytes.Buffer
-	if code := retentionSweep(f.app, false, true, &stdout, &stderr); code != exitOK {
+	if code := retentionSweep(f.app, false, false, true, &stdout, &stderr); code != exitOK {
 		t.Fatalf("json preview exit = %d, stderr=%s", code, stderr.String())
 	}
 	var res ports.RetentionSweepResult

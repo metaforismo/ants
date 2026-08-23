@@ -52,10 +52,10 @@ outbox:
     # than delivered_after, discarded rows (operator-triaged poison) older
     # than discarded_after — give the latter a longer horizon. Pending,
     # leased, and dead rows are never eligible; events and audit history are
-    # unreachable. Each round deletes at most batch_size rows,
-    # oldest-terminal-first; serve runs rounds every interval once any
-    # horizon is set, and `ants outbox retention preview|sweep --yes` drives
-    # them manually.
+    # unreachable. Each round deletes at most batch_size rows — delivered
+    # victims first, oldest-terminal-first within each class; serve runs
+    # rounds every interval once any horizon is set, and
+    # `ants outbox retention preview|sweep --yes` drives them manually.
     delivered_after: 0s
     discarded_after: 0s
     batch_size: 500

@@ -1,11 +1,12 @@
 // Package outboxgc performs bounded garbage-collection rounds over terminal
 // outbox rows (ADR-0016): delivered and discarded rows beyond their
-// configured horizons, oldest-terminal-first, at most BatchSize rows per
-// round. It never touches pending, leased, or dead rows, domain events, or
-// audit history — eligibility is a property of the store's own selection
-// logic, not of this service. A configuration whose horizons are both zero
-// is inert: nothing anywhere may delete anything until retention is
-// intentionally configured.
+// configured horizons — delivered victims claim the round's budget first,
+// then discarded victims, oldest-terminal-first within each class — at most
+// BatchSize rows per round. It never touches pending, leased, or dead rows,
+// domain events, or audit history — eligibility is a property of the store's
+// own selection logic, not of this service. A configuration whose horizons
+// are both zero is inert: nothing anywhere may delete anything until
+// retention is intentionally configured.
 package outboxgc
 
 import (

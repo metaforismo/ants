@@ -73,11 +73,16 @@ instant per round from its own injected clock and reports it back in the
 result (ADR-0011 invariant: callers never supply scheduling timestamps). No
 raw SQL, envelopes, or timestamps cross the port.
 
-### One atomic, oldest-first, bounded round
+### One atomic, class-prioritized, bounded round
 
 A round deletes at most `batch_size` rows total. Budget is allocated
-deterministically: delivered victims first in `(delivered_at, id)` order, then
-discarded victims in `(discarded_at, id)` order with the remaining budget.
+deterministically: delivered victims first in `(delivered_at, id)` order —
+oldest-terminal-first within the class — then discarded victims in
+`(discarded_at, id)` order with the remaining budget. The ordering is a class
+budget with per-class oldest-first consumption, deliberately NOT a global
+oldest-first scan across classes: delivery bookkeeping is reclaimable
+sooner than operator triage history, so under a tight budget the delivered
+class must drain first even when a discarded row is older.
 PostgreSQL executes both deletions as two single statements inside one unit
 of work; each statement selects its victims with `FOR UPDATE SKIP LOCKED` so
 concurrent sweeps, dispatchers, and operator mutations can neither collide
@@ -106,8 +111,10 @@ Both surfaces share one service seam performing one round:
   drain phases, and stopping it early leaves at most a skipped round, never
   partial state (each round is atomic).
 - `ants outbox retention preview|sweep` gives operators on-demand control.
-  `preview` never deletes (it runs the identical selection logic with
-  mutation disabled, so preview and sweep cannot drift). `sweep` requires
+  `preview` never deletes (it runs the identical selection AND budget
+  allocation with mutation disabled, so previews cannot promise more than a
+  bounded round would delete, and preview and sweep cannot drift). `sweep`
+  requires
   `--yes`: without it the command prints what would be deleted and exits with
   usage status — no interactive prompt exists, so automation can never hang,
   and tests prove zero rows are deleted when the flag is omitted.

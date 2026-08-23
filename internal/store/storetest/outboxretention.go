@@ -19,7 +19,9 @@ import (
 // identifiers, so per-row deletion order is pinned through observable
 // behavior — class priority under a tight budget (delivered budget first),
 // eligibility boundaries, and full drain of eligible rows with ineligible
-// rows untouched. Adapter-specific tests assert the within-class
+// rows untouched. DryRun must reproduce a real sweep's numbers exactly,
+// including its budget allocation, so previews cannot promise more than one
+// bounded round deletes. Adapter-specific tests assert the within-class
 // oldest-first victim order against each store's own inspection surface.
 func RunOutboxRetention(t *testing.T, f Factory) {
 	t.Run("InvalidRequestsAreRejected", func(t *testing.T) {
@@ -56,6 +58,10 @@ func RunOutboxRetention(t *testing.T, f Factory) {
 	t.Run("RerunsAreIdempotentAndDryRunMatchesReality", func(t *testing.T) {
 		repos, _, advance := world(f)
 		testRetentionIdempotence(t, repos, advance)
+	})
+	t.Run("DryRunAppliesTheSameClassPriorityAndBudgetAsSweep", func(t *testing.T) {
+		repos, _, advance := world(f)
+		testRetentionDryRunBudget(t, repos, advance)
 	})
 	t.Run("ConcurrentSweepsStayBoundedAndTruthful", func(t *testing.T) {
 		repos, _, advance := world(f)
@@ -233,6 +239,65 @@ func testRetentionClassPriority(t *testing.T, repos ports.Repositories, advance 
 	}
 }
 
+// testRetentionDryRunBudget pins the preview contract when eligible rows
+// exceed the limit and both classes compete for one budget: the dry run must
+// report exactly what a real sweep with the same request deletes — delivered
+// victims first up to the remaining budget, discarded with the remainder —
+// never the raw size of the eligible backlog. It also proves previews delete
+// nothing.
+func testRetentionDryRunBudget(t *testing.T, repos ports.Repositories, advance func(time.Duration)) {
+	ctx := context.Background()
+	seedTenant(ctx, t, repos, tenantID, "acme")
+
+	for i := range 3 {
+		seedDelivered(t, ctx, repos, fmt.Sprintf("obx_evt_retdry_d%d", i))
+		advance(time.Millisecond)
+	}
+	for i := range 2 {
+		seedDiscarded(t, ctx, repos, fmt.Sprintf("obx_evt_retdry_c%d", i))
+		advance(time.Millisecond)
+	}
+	advance(2 * retentionHorizon)
+
+	req := ports.RetentionSweepRequest{
+		DeliveredOlderThan: retentionHorizon,
+		DiscardedOlderThan: retentionHorizon,
+		Limit:              4,
+		DryRun:             true,
+	}
+	dry, err := repos.Outbox.SweepRetention(ctx, req)
+	if err != nil || dry.DeletedDelivered != 3 || dry.DeletedDiscarded != 1 {
+		t.Fatalf("dry run must apply class priority (3 delivered) then spend the remaining budget on one discarded row: %+v %v", dry, err)
+	}
+	if stats := statsOf(t, repos); stats.Delivered != 3 || stats.Discarded != 2 {
+		t.Fatalf("dry run must not delete anything: %+v", stats)
+	}
+
+	real := req
+	real.DryRun = false
+	gotReal, err := repos.Outbox.SweepRetention(ctx, real)
+	if err != nil || gotReal.DeletedDelivered != 3 || gotReal.DeletedDiscarded != 1 {
+		t.Fatalf("sweep must match the preview exactly: %+v %v", gotReal, err)
+	}
+
+	// Five rows were eligible against a budget of four, so the continuation
+	// round must still see the leftover discarded row — previews track
+	// reality across rounds.
+	exhausted, err := repos.Outbox.SweepRetention(ctx, req)
+	if err != nil || exhausted.DeletedDelivered != 0 || exhausted.DeletedDiscarded != 1 {
+		t.Fatalf("dry run must preview exactly the row left beyond the earlier bound: %+v %v", exhausted, err)
+	}
+	drain := req
+	drain.DryRun = false
+	final, err := repos.Outbox.SweepRetention(ctx, drain)
+	if err != nil || final.DeletedDelivered != 0 || final.DeletedDiscarded != 1 {
+		t.Fatalf("continuation round collects the leftover: %+v %v", final, err)
+	}
+	if stats := statsOf(t, repos); stats.Delivered+stats.Discarded != 0 {
+		t.Fatalf("the full population must be gone after three bounded rounds: %+v", stats)
+	}
+}
+
 func testRetentionIdempotence(t *testing.T, repos ports.Repositories, advance func(time.Duration)) {
 	ctx := context.Background()
 	seedTenant(ctx, t, repos, tenantID, "acme")
@@ -407,7 +472,17 @@ func testRetentionZeroExempt(t *testing.T, repos ports.Repositories, advance fun
 	advance(24 * time.Hour)
 
 	// A zero horizon exempts its class even for infinitely old rows: this
-	// is the rule that keeps unconfigured deployments inert.
+	// is the rule that keeps unconfigured deployments inert. The dry run
+	// must honor the same exemption — an exempt class is never counted.
+	dry, err := repos.Outbox.SweepRetention(ctx, ports.RetentionSweepRequest{
+		DeliveredOlderThan: 0,
+		DiscardedOlderThan: retentionHorizon,
+		Limit:              10,
+		DryRun:             true,
+	})
+	if err != nil || dry.DeletedDelivered != 0 || dry.DeletedDiscarded != 1 {
+		t.Fatalf("zero horizon must exempt delivered from previews too: %+v %v", dry, err)
+	}
 	res, err := repos.Outbox.SweepRetention(ctx, ports.RetentionSweepRequest{
 		DeliveredOlderThan: 0,
 		DiscardedOlderThan: retentionHorizon,

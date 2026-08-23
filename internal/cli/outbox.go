@@ -483,13 +483,18 @@ func runRetentionSweep(args []string, stdout, stderr io.Writer, destructive bool
 	if application == nil {
 		return code
 	}
+	return retentionSweep(application, destructive, *confirmed, cf.json, stdout, stderr)
+}
 
-	// Destructive sweeps are gated before any mutation: the refusal carries
-	// the real preview numbers computed by the non-destructive path, so an
-	// unconfirmed command deletes nothing while showing exactly what it
-	// would have done.
-	if destructive && !*confirmed {
-		res, perr := application.Retention.Preview(context.Background())
+// retentionSweep is the execution core: previews report without deleting,
+// sweeps perform one bounded round. The --yes gate lives here, before any
+// mutation path: the refusal carries the real preview numbers computed by
+// the non-destructive path, so an unconfirmed command deletes nothing while
+// showing exactly what it would have done.
+func retentionSweep(application *app.App, delete, confirmed, asJSON bool, stdout, stderr io.Writer) int {
+	ctx := context.Background()
+	if delete && !confirmed {
+		res, perr := application.Retention.Preview(ctx)
 		if perr != nil {
 			printTypedError(stderr, perr)
 			return exitFailure
@@ -501,13 +506,6 @@ func runRetentionSweep(args []string, stdout, stderr io.Writer, destructive bool
 			res.DeletedDelivered, res.DeletedDiscarded, res.Cutoff.UTC().Format(time.RFC3339))
 		return exitUsage
 	}
-	return retentionSweep(application, destructive, cf.json, stdout, stderr)
-}
-
-// retentionSweep is the execution core: previews report without deleting,
-// sweeps perform one bounded round.
-func retentionSweep(application *app.App, delete bool, asJSON bool, stdout, stderr io.Writer) int {
-	ctx := context.Background()
 	var (
 		res ports.RetentionSweepResult
 		err error

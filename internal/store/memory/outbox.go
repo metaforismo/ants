@@ -311,10 +311,12 @@ func afterKeyset(createdAt time.Time, id string, afterAt time.Time, afterID stri
 }
 
 // SweepRetention deletes at most Limit terminal rows beyond their class
-// horizon (ADR-0016), oldest-terminal-first, under the store's single write
-// lock — the same atomicity PostgreSQL gets from its unit of work. Eligibility
-// is measured against this store's clock; NULL terminal timestamps are never
-// eligible. DryRun applies the identical selection without mutating.
+// horizon (ADR-0016) — delivered victims claim the budget first, then
+// discarded victims, oldest-terminal-first within each class — under the
+// store's single write lock, the same atomicity PostgreSQL gets from its
+// unit of work. Eligibility is measured against this store's clock; NULL
+// terminal timestamps are never eligible. DryRun applies the identical
+// selection without mutating.
 func (r *OutboxRepository) SweepRetention(_ context.Context, req ports.RetentionSweepRequest) (ports.RetentionSweepResult, error) {
 	if err := req.Validate(); err != nil {
 		return ports.RetentionSweepResult{}, err
