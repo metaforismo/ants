@@ -11,17 +11,22 @@ import (
 
 type RunRepository struct{ st *Store }
 
+// runScanner is satisfied by both *sql.Row and *sql.Rows, so one column
+// mapping serves single-row reads and list scans alike.
+type runScanner interface{ Scan(dest ...any) error }
+
 var _ interface {
 	Create(context.Context, *domain.Run) error
 	Get(context.Context, domain.TenantID, domain.RunID) (*domain.Run, error)
 	Update(context.Context, *domain.Run, int64) error
 	GetByIdempotencyKey(context.Context, domain.TenantID, domain.ThreadID, string) (*domain.Run, error)
+	ListByThread(context.Context, domain.TenantID, domain.ThreadID, int64, int) ([]*domain.Run, int64, error)
 } = (*RunRepository)(nil)
 
 const runColumns = `id, tenant_id, thread_id, spec_id, status, idempotency_key,
 	task_ids, report, principal, failure, version, created_at, updated_at, finished_at`
 
-func scanRun(row *sql.Row) (*domain.Run, error) {
+func scanRun(row runScanner) (*domain.Run, error) {
 	var (
 		r               domain.Run
 		specID          sql.NullString
@@ -172,6 +177,65 @@ func (r *RunRepository) GetByIdempotencyKey(ctx context.Context, tenantID domain
 		`SELECT `+runColumns+` FROM runs
 		 WHERE tenant_id = $1 AND thread_id = $2 AND idempotency_key = $3`,
 		string(tenantID), string(threadID), key))
+}
+
+func (r *RunRepository) ListByThread(ctx context.Context, tenantID domain.TenantID, threadID domain.ThreadID, after int64, limit int) ([]*domain.Run, int64, error) {
+	var total int64
+	err := r.st.q(ctx).QueryRowContext(ctx,
+		`SELECT COUNT(*) FROM runs WHERE tenant_id = $1 AND thread_id = $2`,
+		string(tenantID), string(threadID)).Scan(&total)
+	if errors.Is(err, sql.ErrNoRows) || (err == nil && total == 0) {
+		// Distinguish unknown or foreign thread from a known-but-empty one.
+		if _, terr := r.threadExists(ctx, tenantID, threadID); terr != nil {
+			return nil, 0, terr
+		}
+		if err != nil {
+			return nil, 0, wrapScan(err)
+		}
+		return []*domain.Run{}, 0, nil
+	}
+	if err != nil {
+		return nil, 0, wrapScan(err)
+	}
+	query := `SELECT ` + runColumns + ` FROM runs
+	          WHERE tenant_id = $1 AND thread_id = $2
+	          ORDER BY created_at ASC, id ASC OFFSET $3`
+	args := []any{string(tenantID), string(threadID), max(after, 0)}
+	if limit > 0 {
+		query += ` LIMIT $4`
+		args = append(args, limit)
+	}
+	rows, err := r.st.q(ctx).QueryContext(ctx, query, args...)
+	if err != nil {
+		return nil, 0, wrapScan(err)
+	}
+	defer rows.Close()
+	out := []*domain.Run{}
+	for rows.Next() {
+		run, scanErr := scanRun(rows)
+		if scanErr != nil {
+			return nil, 0, scanErr
+		}
+		out = append(out, run)
+	}
+	return out, total, rows.Err()
+}
+
+// threadExists resolves the uniform not-found for a list against an unknown
+// or foreign-tenant thread; known threads answer with their (possibly empty)
+// page.
+func (r *RunRepository) threadExists(ctx context.Context, tenantID domain.TenantID, threadID domain.ThreadID) (bool, error) {
+	var ok bool
+	err := r.st.q(ctx).QueryRowContext(ctx,
+		`SELECT EXISTS (SELECT 1 FROM threads WHERE id = $1 AND tenant_id = $2)`,
+		string(threadID), string(tenantID)).Scan(&ok)
+	if err != nil {
+		return false, wrapScan(err)
+	}
+	if !ok {
+		return false, domain.NotFoundf("thread", threadID)
+	}
+	return true, nil
 }
 
 func nonNilTaskIDs(in []domain.TaskID) []domain.TaskID {

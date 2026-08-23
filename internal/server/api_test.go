@@ -10,6 +10,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/metaforismo/ants/internal/config"
 	"github.com/metaforismo/ants/internal/domain"
@@ -290,12 +291,13 @@ func TestCrossTenantIsolation(t *testing.T) {
 
 	// Tenant B must not see any A resource: uniform 404 everywhere.
 	for name, path := range map[string]string{
-		"project":  "/v1/projects/" + projectA,
-		"thread":   "/v1/threads/" + threadA,
-		"run":      "/v1/runs/" + runA,
-		"messages": "/v1/threads/" + threadA + "/messages",
-		"events":   "/v1/runs/" + runA + "/events",
-		"report":   "/v1/runs/" + runA + "/report",
+		"project":    "/v1/projects/" + projectA,
+		"thread":     "/v1/threads/" + threadA,
+		"run":        "/v1/runs/" + runA,
+		"messages":   "/v1/threads/" + threadA + "/messages",
+		"threadruns": "/v1/threads/" + threadA + "/runs",
+		"events":     "/v1/runs/" + runA + "/events",
+		"report":     "/v1/runs/" + runA + "/report",
 	} {
 		status, _, raw := e.do(http.MethodGet, path, e.headers(e.tenantBS), "")
 		if status != http.StatusNotFound {
@@ -334,6 +336,109 @@ func (e *env) startRun(t *testing.T, threadID string) string {
 		t.Fatal(err)
 	}
 	return run["id"].(string)
+}
+
+// seedRunAt inserts a run through the real store with an explicit creation
+// instant, so read-path tests pin exact ordering without racing the pipeline
+// (which allows only one live run per thread).
+func (e *env) seedRunAt(t *testing.T, tenantSlug, threadID string, at time.Time) string {
+	t.Helper()
+	tenant, err := e.application.Repos.Tenants.GetBySlug(context.Background(), tenantSlug)
+	if err != nil {
+		t.Fatalf("resolve fixture tenant: %v", err)
+	}
+	idStr, err := domain.NewID(domain.PrefixRun)
+	if err != nil {
+		t.Fatalf("generate run id: %v", err)
+	}
+	run, err := domain.NewRun(domain.RunID(idStr), tenant.ID, domain.ThreadID(threadID), "seeded-"+uniqueSuffix(), at)
+	if err != nil {
+		t.Fatalf("construct run: %v", err)
+	}
+	if err := e.application.Repos.Runs.Create(context.Background(), run); err != nil {
+		t.Fatalf("seed run: %v", err)
+	}
+	return string(run.ID)
+}
+
+// runPage mirrors the GET /v1/threads/{id}/runs envelope. Runs is a pointer
+// so the empty case can pin "array, never JSON null".
+type runPage struct {
+	Runs  *[]struct {
+		ID     string `json:"id"`
+		Status string `json:"status"`
+	} `json:"runs"`
+	Total int64 `json:"total"`
+}
+
+// TestListThreadRuns pins the read contract the web console uses to discover
+// and reattach to a thread's runs: stable oldest-first order, cursor
+// pagination boundaries, an explicit empty page for a runless thread,
+// uniform not-found for unknown threads, and authentication enforcement.
+func TestListThreadRuns(t *testing.T) {
+	e := newEnv(t)
+	_, threadID := e.seedProjectThread(e.tenantAS)
+
+	// Unauthenticated reads are refused like every other authenticated route.
+	status, _, raw := e.do(http.MethodGet, "/v1/threads/"+threadID+"/runs", map[string]string{}, "")
+	if status != http.StatusUnauthorized {
+		t.Fatalf("unauthenticated list must be 401, got %d (%s)", status, raw)
+	}
+
+	runA := e.startRun(t, threadID)
+	// Two further runs are seeded straight into the real store so the stable
+	// order is exact regardless of pipeline timing; the read path under test
+	// cannot tell them from API-started ones.
+	runB := e.seedRunAt(t, e.tenantAS, threadID, time.Now().UTC().Add(time.Second))
+	runC := e.seedRunAt(t, e.tenantAS, threadID, time.Now().UTC().Add(2*time.Second))
+
+	var full runPage
+	e.doJSON(t, http.MethodGet, "/v1/threads/"+threadID+"/runs", e.tenantAS, nil, &full, http.StatusOK)
+	if full.Runs == nil || len(*full.Runs) != 3 || full.Total != 3 {
+		t.Fatalf("expected three runs with total 3, got %+v (total %d)", full.Runs, full.Total)
+	}
+	wantOrder := []string{runA, runB, runC}
+	for i, want := range wantOrder {
+		if got := (*full.Runs)[i].ID; got != want {
+			t.Fatalf("position %d = %s, want %s (created asc)", i, got, want)
+		}
+	}
+
+	// The second page resumes exactly after the first entry of the stable order.
+	var tail runPage
+	e.doJSON(t, http.MethodGet, "/v1/threads/"+threadID+"/runs?after=1", e.tenantAS, nil, &tail, http.StatusOK)
+	if tail.Runs == nil || len(*tail.Runs) != 2 || (*tail.Runs)[0].ID != runB || tail.Total != 3 {
+		t.Fatalf("after=1 must resume at the second entry with unchanged total: %+v total %d", tail.Runs, tail.Total)
+	}
+
+	// A cursor beyond the end is an empty page, not an error.
+	var beyond runPage
+	e.doJSON(t, http.MethodGet, "/v1/threads/"+threadID+"/runs?after=99", e.tenantAS, nil, &beyond, http.StatusOK)
+	if beyond.Runs == nil || len(*beyond.Runs) != 0 || beyond.Total != 3 {
+		t.Fatalf("beyond-max cursor must be empty with stable total: %+v total %d", beyond.Runs, beyond.Total)
+	}
+
+	// A thread that exists but never ran yields an explicit empty array —
+	// never null — so clients can rely on the array contract.
+	_, emptyThread := e.seedProjectThread(e.tenantAS)
+	var none runPage
+	e.doJSON(t, http.MethodGet, "/v1/threads/"+emptyThread+"/runs", e.tenantAS, nil, &none, http.StatusOK)
+	if none.Runs == nil || len(*none.Runs) != 0 || none.Total != 0 {
+		t.Fatalf("runless thread must list an empty non-null page: %+v total %d", none.Runs, none.Total)
+	}
+
+	// Unknown thread ids are uniform not-found problems (no existence oracle).
+	missing := "thr_" + strings.Repeat("missing", 4)
+	status, _, raw = e.do(http.MethodGet, "/v1/threads/"+missing+"/runs", e.headers(e.tenantAS), "")
+	if status != http.StatusNotFound {
+		t.Fatalf("missing thread must be uniform 404, got %d (%s)", status, raw)
+	}
+	var problem struct {
+		Code string `json:"code"`
+	}
+	if err := json.Unmarshal(raw, &problem); err != nil || problem.Code == "" {
+		t.Fatalf("not-found must be a problem document: %s", raw)
+	}
 }
 
 func TestReportNotReadyWhileRunningAndCancelConflictsAfterFinish(t *testing.T) {

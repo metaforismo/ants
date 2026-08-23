@@ -69,6 +69,32 @@ func (r *RunRepository) GetByIdempotencyKey(_ context.Context, tenantID domain.T
 	return cloneRun(run), nil
 }
 
+func (r *RunRepository) ListByThread(_ context.Context, tenantID domain.TenantID, threadID domain.ThreadID, after int64, limit int) ([]*domain.Run, int64, error) {
+	unlock := lockRead(r.st)
+	defer unlock()
+	t, ok := r.st.threads[threadID]
+	if !ok || t.TenantID != tenantID {
+		return nil, 0, notFound("thread", threadID)
+	}
+	owned := make([]*domain.Run, 0, len(r.st.runs))
+	for _, run := range r.st.runs {
+		if run.ThreadID == threadID && run.TenantID == tenantID {
+			owned = append(owned, run)
+		}
+	}
+	sort.Slice(owned, func(i, j int) bool {
+		if !owned[i].CreatedAt.Equal(owned[j].CreatedAt) {
+			return owned[i].CreatedAt.Before(owned[j].CreatedAt)
+		}
+		return owned[i].ID < owned[j].ID
+	})
+	out := make([]*domain.Run, 0, len(owned))
+	for i := max(after, 0); i < int64(len(owned)) && (limit <= 0 || len(out) < limit); i++ {
+		out = append(out, cloneRun(owned[i]))
+	}
+	return out, int64(len(owned)), nil
+}
+
 type TaskRepository struct{ st *storeState }
 
 func (r *TaskRepository) Create(_ context.Context, task *domain.Task) error {

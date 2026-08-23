@@ -134,6 +134,10 @@ func Run(t *testing.T, f Factory) {
 		repos, _ := world()
 		testRunIdempotency(t, repos)
 	})
+	t.Run("RunListByThreadIsTenantScopedStableAndPaginated", func(t *testing.T) {
+		repos, _ := world()
+		testRunListByThread(t, repos)
+	})
 	t.Run("ConcurrentIdempotentRunCreationHasSingleWinner", func(t *testing.T) {
 		repos, _ := world()
 		testConcurrentIdempotentCreate(t, repos)
@@ -390,6 +394,104 @@ func testRunIdempotency(t *testing.T, repos ports.Repositories) {
 	got, err := repos.Runs.GetByIdempotencyKey(ctx, tenantID, thread.ID, "key-1")
 	if err != nil || got.ID != first.ID {
 		t.Fatalf("replay lookup returned wrong run: %+v %v", got, err)
+	}
+}
+
+// seedRunForKey creates one run on the given thread with a distinct
+// idempotency key and creation instant.
+func seedRunForKey(t *testing.T, repos ports.Repositories, thread *domain.Thread, key string, at time.Time) *domain.Run {
+	t.Helper()
+	ctx := context.Background()
+	idStr, _ := domain.NewID(domain.PrefixRun)
+	run, err := domain.NewRun(domain.RunID(idStr), thread.TenantID, thread.ID, key, at)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := repos.Runs.Create(ctx, run); err != nil {
+		t.Fatalf("seed run %s: %v", key, err)
+	}
+	return run
+}
+
+// testRunListByThread pins the read contract behind GET /v1/threads/{id}/runs:
+// only the caller's own runs come back, oldest first in the stable
+// (created_at, id asc) order, honoring cursor and limit, with foreign or
+// unknown threads uniformly not-found (ADR-0004) while a known empty thread
+// yields an empty page.
+func testRunListByThread(t *testing.T, repos ports.Repositories) {
+	ctx := context.Background()
+	seedTenant(ctx, t, repos, tenantID, "acme")
+	seedTenant(ctx, t, repos, otherTenID, "other")
+	project := seedProject(ctx, t, repos, tenantID)
+	foreignProject := seedForeignProject(ctx, t, repos, otherTenID)
+
+	thread := seedThreadAt(ctx, t, repos, tenantID, project.ID, "runs thread", fixedTime(2))
+	foreignThread := seedThreadAt(ctx, t, repos, otherTenID, foreignProject.ID, "foreign thread", fixedTime(2))
+	emptyThread := seedThreadAt(ctx, t, repos, tenantID, project.ID, "empty thread", fixedTime(3))
+
+	first := seedRunForKey(t, repos, thread, "list-1", fixedTime(10))
+	second := seedRunForKey(t, repos, thread, "list-2", fixedTime(20))
+	// Equal created_at must still yield one deterministic order on every
+	// store implementation: ties resolve by ascending id.
+	tieB := seedRunForKey(t, repos, thread, "tie-b", fixedTime(30))
+	tieA := seedRunForKey(t, repos, thread, "tie-a", fixedTime(30))
+	seedRunForKey(t, repos, foreignThread, "foreign", fixedTime(15))
+
+	tieFirst, tieSecond := tieA.ID, tieB.ID
+	if tieSecond < tieFirst {
+		tieFirst, tieSecond = tieSecond, tieFirst
+	}
+	wantOrder := []domain.RunID{first.ID, second.ID, tieFirst, tieSecond}
+
+	list, total, err := repos.Runs.ListByThread(ctx, tenantID, thread.ID, 0, 0)
+	if err != nil || total != 4 {
+		t.Fatalf("full list: %d runs, total %d, err %v", len(list), total, err)
+	}
+	for i, want := range wantOrder {
+		if list[i].ID != want {
+			t.Fatalf("position %d = %s, want %s (created asc, id asc)", i, list[i].ID, want)
+		}
+	}
+
+	page, total, err := repos.Runs.ListByThread(ctx, tenantID, thread.ID, 0, 2)
+	if err != nil || total != 4 || len(page) != 2 {
+		t.Fatalf("limited first page: %d runs, total %d, err %v", len(page), total, err)
+	}
+	if page[1].ID != wantOrder[1] {
+		t.Fatalf("limit must keep the earliest entries: %+v", page)
+	}
+
+	rest, total, err := repos.Runs.ListByThread(ctx, tenantID, thread.ID, 2, 0)
+	if err != nil || total != 4 || len(rest) != 2 {
+		t.Fatalf("page after cursor: %d runs, total %d, err %v", len(rest), total, err)
+	}
+	if rest[0].ID != wantOrder[2] {
+		t.Fatalf("cursor must resume exactly at position 2: got %s", rest[0].ID)
+	}
+
+	beyond, total, err := repos.Runs.ListByThread(ctx, tenantID, thread.ID, int64(len(wantOrder))+100, 0)
+	if err != nil || total != 4 || len(beyond) != 0 {
+		t.Fatalf("beyond-max cursor must be an empty page: %d/%d %v", len(beyond), total, err)
+	}
+
+	empty, total, err := repos.Runs.ListByThread(ctx, tenantID, emptyThread.ID, 0, 0)
+	if err != nil || total != 0 || len(empty) != 0 || empty == nil {
+		t.Fatalf("known thread without runs must list an empty non-nil page: %d/%d %v", len(empty), total, err)
+	}
+
+	crossTenantErr := try(func() error {
+		_, _, err := repos.Runs.ListByThread(ctx, otherTenID, thread.ID, 0, 0)
+		return err
+	})
+	if ErrKind(crossTenantErr) != domain.ErrKindNotFound {
+		t.Fatalf("foreign-tenant list must be uniform not-found, got %v", crossTenantErr)
+	}
+	missingErr := try(func() error {
+		_, _, err := repos.Runs.ListByThread(ctx, tenantID, domain.ThreadID(tid("thr", "missingthread000000")), 0, 0)
+		return err
+	})
+	if ErrKind(missingErr) != domain.ErrKindNotFound {
+		t.Fatalf("unknown-thread list must be uniform not-found, got %v", missingErr)
 	}
 }
 

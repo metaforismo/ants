@@ -243,6 +243,28 @@ func (s *Server) handleListMessages(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"messages": messages, "total": total})
 }
 
+// handleListThreadRuns serves one page of the thread's run history in the
+// store's stable (created_at, id asc) order. The store distinguishes an
+// unknown or foreign-tenant thread (uniform 404, ADR-0004) from a known
+// thread whose page is simply empty, so no existence oracle leaks here.
+func (s *Server) handleListThreadRuns(w http.ResponseWriter, r *http.Request) {
+	p := mustPrincipal(w, r)
+	if p == nil {
+		return
+	}
+	threadID, err := domain.ParseThreadID(r.PathValue("id"))
+	if err != nil {
+		writeProblem(w, r, asDomainError(err))
+		return
+	}
+	runs, total, listErr := s.repos.Runs.ListByThread(r.Context(), p.TenantID, threadID, queryInt64(r, "after"), defaultPageLimit)
+	if listErr != nil {
+		writeProblem(w, r, asDomainError(listErr))
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"runs": runs, "total": total})
+}
+
 // ---- runs ----
 
 func (s *Server) handleStartRun(w http.ResponseWriter, r *http.Request) {
