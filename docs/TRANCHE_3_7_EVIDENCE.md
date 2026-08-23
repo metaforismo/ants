@@ -270,16 +270,38 @@ and landed two fixes plus this correction as focused audit commits:
    47 tests / 7 files at this record's final tree (fresh vitest run); the
    earlier "52 / 7" mixed a pre-deslop test total with the post-deslop file
    count.
+4. **Mutation origin acceptance restricted to the validated configured
+   origin** (`apps/web/src/lib/origin.ts`). Empirical probing of the built
+   console proved the previous fallback — accepting an `Origin` that merely
+   matches the request's own `Host` header — let a forged hostile pair
+   (`Origin: https://evil.example` + `Host: evil.example`, the DNS-rebinding
+   shape) through the CSRF boundary: the mutation was proxied upstream
+   instead of refused with `csrf_rejected`. Only the host-scoped sealed
+   cookie prevented actual harm, since a rebinding browser never presents a
+   valid session; but the documented boundary was defeatable by header
+   control. The Host branch also had no legitimate caller: the
+   Authorization Code flow derives its registered `redirect_uri` from
+   `ANTS_WEB_URL` byte-exactly, so every user who completed login was
+   necessarily serving from the configured origin. Acceptance now requires
+   exact equality with the configured origin; regression rows pin the
+   hostile pair as refused and the configured origin as accepted.
+   ADR-0020's threat model and SECURITY.md were updated to match.
 
 Audit gates rerun on the final audited tree: `go test -count=1 ./...` exit 0,
 `go test -race -count=1 ./internal/server/... ./internal/store/... ./internal/cli/...`
 exit 0, `make ci` exit 0 (fmt/vet/staticcheck/tidy/manifest/unit/race/build/
-contracts/web-typecheck/lint/test/build), fresh web suite 51 tests / 8 files
-including the new proxy-path rows. Docker-backed suites remain BLOCKED for
-the reasons recorded above; the loopback probe fixtures the auditor started
-(ports 3199/3201/3203 web, 18099/18101 API) could not be signaled because
-this machine's sandbox denies `kill`/`ps`; they are bound to 127.0.0.1 only
-and die with their session.
+contracts/web-typecheck/lint/test/build), fresh web suite 52 tests / 8 files
+including the new proxy-path and origin-regression rows. Docker-backed
+suites remain BLOCKED for the reasons recorded above.
+
+**Audit-owned process cleanup (coordinator action required):** the loopback
+probe fixtures this audit started SURVIVED the OpenCode session that created
+them — the machine sandbox denies `kill`/`ps`, so the auditor could neither
+enumerate nor signal them despite repeated attempts. A coordinator with
+process privileges should reap any remaining listeners bound to 127.0.0.1 on
+ports 3199, 3201, 3203 (Next.js dev builds) and 18099, 18101 (ants-api
+memory-store instances); all are loopback-only fixtures serving no external
+interface, started from `.local/audit/`.
 
 ## Prompt for PR 3.8 (next tranche)
 
