@@ -150,6 +150,23 @@ func TestRecorderImplicitStatusIsOK(t *testing.T) {
 	}
 }
 
+func TestRecorderMultipleWriteHeaderRecordsWhatWasSent(t *testing.T) {
+	// net/http sends only the first WriteHeader code and treats later calls
+	// as superfluous no-ops. The recorder must report the first (the status
+	// actually on the wire) while forwarding every call verbatim.
+	base := newBaseWriter()
+	rec, wrapped := wrapWriter(base)
+	wrapped.WriteHeader(http.StatusTeapot)
+	wrapped.WriteHeader(http.StatusBadGateway)
+
+	if len(base.statuses) != 2 || base.statuses[0] != http.StatusTeapot || base.statuses[1] != http.StatusBadGateway {
+		t.Errorf("every WriteHeader must forward verbatim, got %v", base.statuses)
+	}
+	if rec.status != http.StatusTeapot || !rec.wroteHeader {
+		t.Errorf("recorder must capture the first sent status (%d), got %d wrote=%v", http.StatusTeapot, rec.status, rec.wroteHeader)
+	}
+}
+
 // ---- panic handling through the real middleware chain ----
 
 func middlewareServer(log *slog.Logger) *Server {
@@ -243,6 +260,35 @@ func TestPanicAfterResponseStartDoesNotDoubleWrite(t *testing.T) {
 	}
 	if core.status != http.StatusOK {
 		t.Errorf("status stays what was actually sent, got %d", core.status)
+	}
+}
+
+func TestRequestLogReportsFirstSentStatusOnDoubleWrite(t *testing.T) {
+	// A buggy handler that writes headers twice gets exactly one response
+	// from net/http — the first code. Metrics and logs observe that one.
+	s := middlewareServer(nil)
+	buf := &bytes.Buffer{}
+	s.log = slog.New(slog.NewJSONHandler(buf, nil))
+	handler := func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusTeapot)
+		w.WriteHeader(http.StatusInternalServerError)
+	}
+	req := httptest.NewRequest(http.MethodGet, "/x", nil)
+	base := newBaseWriter()
+	_, wrapped := wrapWriter(base)
+	s.withRequestLog("/x", false, handler).ServeHTTP(wrapped, req)
+
+	var reqRec map[string]any
+	for _, m := range decodeRecords(t, buf) {
+		if m["msg"] == "http_request" {
+			reqRec = m
+		}
+	}
+	if reqRec == nil {
+		t.Fatal("request record required")
+	}
+	if reqRec["status"] != float64(http.StatusTeapot) {
+		t.Errorf("log must report the first sent status %d, got %v", http.StatusTeapot, reqRec["status"])
 	}
 }
 

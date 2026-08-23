@@ -219,8 +219,16 @@ func TestOutboxDeliveryConvergesAcrossProcessRestart(t *testing.T) {
 		t.Fatalf("arm sink crash: %v", err)
 	}
 	waitErr := waitRestartEpoch(epoch1, 20*time.Second)
-	if waitErr == nil || !strings.Contains(fmt.Sprint(waitErr), "killed") {
+	// The death must be the SIGKILL the sink delivered to itself, not an
+	// early clean exit nor this harness's own forcible timeout kill; both
+	// imposter outcomes must fail loudly with the epoch's stderr attached.
+	var exitErr *exec.ExitError
+	if !errors.As(waitErr, &exitErr) {
 		t.Fatalf("epoch 1 must die by its own in-sink SIGKILL, got %v (stderr:\n%s)", waitErr, epoch1.stderr.String())
+	}
+	ws, ok := exitErr.Sys().(syscall.WaitStatus)
+	if !ok || ws.Signal() != syscall.SIGKILL {
+		t.Fatalf("epoch 1 must die from SIGKILL delivered inside the sink, got %v (stderr:\n%s)", waitErr, epoch1.stderr.String())
 	}
 	epoch1.reaped.Store(true)
 	t.Logf("epoch 1 crashed inside the sink as designed: %v", waitErr)

@@ -113,8 +113,15 @@ type requestRecorder struct {
 }
 
 func (r *requestRecorder) WriteHeader(status int) {
-	r.wroteHeader = true
-	r.status = status
+	// net/http sends the first header write and ignores later ones (they are
+	// logged as superfluous), so the first call is the only truthful
+	// observation of the status the client actually receives. Every call
+	// still forwards so the server's own superfluous-write detection and
+	// handler semantics stay untouched.
+	if !r.wroteHeader {
+		r.wroteHeader = true
+		r.status = status
+	}
 	r.ResponseWriter.WriteHeader(status)
 }
 
