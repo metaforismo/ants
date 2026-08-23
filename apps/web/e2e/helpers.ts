@@ -21,8 +21,10 @@ export async function loginViaKeycloak(page: Page): Promise<void> {
   await page.waitForURL(/realms\/ants\/protocol\/openid-connect\/auth/, {
     timeout: 20_000,
   });
-  await page.getByLabel("Username or email").fill(FIXTURE_USER);
-  await page.getByLabel("Password").fill(FIXTURE_PASSWORD);
+  // Keycloak's login theme labels more than one control with accessible
+  // text containing these words; the field ids are the stable contract.
+  await page.locator("#username").fill(FIXTURE_USER);
+  await page.locator("#password").fill(FIXTURE_PASSWORD);
   await page.getByRole("button", { name: "Sign In" }).click();
 
   await page.waitForURL(/\/threads$/, { timeout: 30_000 });
