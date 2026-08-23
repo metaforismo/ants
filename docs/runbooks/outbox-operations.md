@@ -50,7 +50,12 @@ Both actions require `--tenant` and `--actor`; both append a versioned
 domain event (`outbox.dead_letter.{requeued,discarded}.v1`), enqueue its
 durable delivery, and write a tenant-scoped audit record inside ONE
 database transaction. There is no way to intervene without leaving this
-trail, and no way for a half-applied intervention to commit.
+trail, and no way for a half-applied intervention to commit. The optional
+`--trace-id` lands verbatim in that event's and that audit record's
+`trace_id` slot so the intervention joins the operator's own tooling
+correlation; it must satisfy the shared correlation grammar (1–128
+characters of `[A-Za-z0-9._~:@-]`, ADR-0018) — anything else is rejected
+as a typed invalid request before any row is touched.
 
 ```sh
 # Restart a fresh bounded lifecycle (attempts reset, immediately due):

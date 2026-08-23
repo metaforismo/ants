@@ -27,6 +27,12 @@ networks.
   identifiers, secrets, or client addresses. Inbound correlation ids are
   grammar-validated before echoing; rejected values are replaced, never
   logged.
+- Correlation propagation is injection-safe by construction (ADR-0018):
+  external identifiers enter durable records only through one validated edge,
+  the same acceptance grammar governs request echoes and operator
+  `--trace-id`, and control characters or oversized values can never reach a
+  log line, event envelope, or audit payload. Work outside a request carries
+  no correlation at all rather than a fabricated identity.
 - Audit events record every policy decision with actor, action, and outcome.
 
 ## Known limitations (accepted for the current tranches)
