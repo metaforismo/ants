@@ -4,6 +4,12 @@ package postgres_test
 // fully-delivered across a real process death, with at-least-once redelivery
 // but no duplicated logical effects at the consumer boundary.
 //
+// Correlation durability (ADR-0018): every seeded event carries its own
+// correlation id, and after the crash and redelivery cycle each id must be
+// byte-identical in BOTH durable copies — the events row's trace_id column
+// and the outbox envelope serialized at publish time. Process death never
+// rewrites correlation history.
+//
 // Production code versus test harness, explicitly:
 //
 //   - PRODUCTION components under test: the PostgreSQL store adapter (its
@@ -355,14 +361,22 @@ func seedRestartTenant(t *testing.T, ctx context.Context, store *pgrepos.Store) 
 	return tenant.ID
 }
 
-func seedRestartEvents(t *testing.T, ctx context.Context, store *pgrepos.Store, tenantID domain.TenantID) []domain.EventID {
+// seededEvent pairs one event's identity with the correlation id its
+// durable copies must both carry after crash and redelivery.
+type seededEvent struct {
+	id    domain.EventID
+	trace string
+}
+
+func seedRestartEvents(t *testing.T, ctx context.Context, store *pgrepos.Store, tenantID domain.TenantID) []seededEvent {
 	t.Helper()
-	ids := make([]domain.EventID, 0, seededEvents)
+	ids := make([]seededEvent, 0, seededEvents)
 	for i := 0; i < seededEvents; i++ {
 		evtID, err := domain.NewEventID()
 		if err != nil {
 			t.Fatal(err)
 		}
+		trace := fmt.Sprintf("restart-corr-%d", i)
 		evt := &domain.Event{
 			ID:               evtID,
 			Type:             domain.EventTenantCreated,
@@ -372,7 +386,7 @@ func seedRestartEvents(t *testing.T, ctx context.Context, store *pgrepos.Store, 
 			AggregateID:      string(tenantID),
 			AggregateVersion: int64(i + 1),
 			Actor:            domain.Actor{Type: domain.PrincipalSystem},
-			TraceID:          "tr_restart-convergence",
+			TraceID:          trace,
 			Data:             map[string]any{"harness": true},
 		}
 		// The transactional append enqueues exactly one outbox delivery per
@@ -380,7 +394,7 @@ func seedRestartEvents(t *testing.T, ctx context.Context, store *pgrepos.Store, 
 		if err := store.Events.Append(ctx, evt); err != nil {
 			t.Fatalf("seed event %d: %v", i, err)
 		}
-		ids = append(ids, evtID)
+		ids = append(ids, seededEvent{id: evtID, trace: trace})
 	}
 	return ids
 }
@@ -452,7 +466,7 @@ func waitForOutboxConvergence(t *testing.T, pool *sql.DB, wantDelivered int, wit
 
 // ---- final state-based assertions ----
 
-func assertRestartConvergence(t *testing.T, pool *sql.DB, seeded []domain.EventID) {
+func assertRestartConvergence(t *testing.T, pool *sql.DB, seeded []seededEvent) {
 	t.Helper()
 	ctx := context.Background()
 
@@ -509,8 +523,8 @@ func assertRestartConvergence(t *testing.T, pool *sql.DB, seeded []domain.EventI
 		t.Fatal(err)
 	}
 	want := map[string]bool{}
-	for _, id := range seeded {
-		want[string(id)] = true
+	for _, s := range seeded {
+		want[string(s.id)] = true
 	}
 	for id := range gotEffects {
 		if !want[id] {
@@ -523,12 +537,42 @@ func assertRestartConvergence(t *testing.T, pool *sql.DB, seeded []domain.EventI
 		}
 	}
 
-	var eventRows int
+	assertCorrelationSurvivesRestart(t, pool, seeded)
+}
+
+// assertCorrelationSurvivesRestart pins the ADR-0018 durability property:
+// after process death and redelivery, each seeded correlation id is
+// byte-identical in both durable copies — the events row and the outbox
+// envelope serialized at publish time — and nothing else carries those ids.
+func assertCorrelationSurvivesRestart(t *testing.T, pool *sql.DB, seeded []seededEvent) {
+	t.Helper()
+	ctx := context.Background()
+
+	var correlatedRows int
 	if err := pool.QueryRowContext(ctx,
-		`SELECT count(*) FROM events WHERE trace_id = 'tr_restart-convergence'`).Scan(&eventRows); err != nil {
-		t.Fatalf("events survived: %v", err)
+		`SELECT count(*) FROM events WHERE trace_id LIKE 'restart-corr-%'`).Scan(&correlatedRows); err != nil {
+		t.Fatalf("count correlated events: %v", err)
 	}
-	if eventRows != seededEvents {
-		t.Errorf("durable events must remain untouched (%d), got %d", seededEvents, eventRows)
+	if correlatedRows != seededEvents {
+		t.Errorf("exactly %d events must carry their seed correlations, got %d", seededEvents, correlatedRows)
+	}
+
+	for _, s := range seeded {
+		var eventTrace, envelopeTrace string
+		err := pool.QueryRowContext(ctx,
+			`SELECT e.trace_id, o.envelope->>'trace_id'
+			   FROM events e
+			   JOIN outbox o ON o.dedup_key = 'event:' || $1
+			  WHERE e.id = $1`, string(s.id)).Scan(&eventTrace, &envelopeTrace)
+		if err != nil {
+			t.Fatalf("event %s must exist with exactly one delivery: %v", s.id, err)
+		}
+		if eventTrace != s.trace {
+			t.Errorf("event %s trace_id drifted: %q, want %q", s.id, eventTrace, s.trace)
+		}
+		if envelopeTrace != s.trace {
+			t.Errorf("redelivered envelope of %s lost its correlation: %q, want %q",
+				s.id, envelopeTrace, s.trace)
+		}
 	}
 }
