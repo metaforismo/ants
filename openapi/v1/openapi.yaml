@@ -256,6 +256,41 @@ paths:
           $ref: "#/components/responses/Problem"
 
   /v1/threads/{id}/runs:
+    get:
+      tags: [runs]
+      summary: List the runs of a thread
+      description: |
+        Runs are returned oldest first in one stable order (creation time,
+        ties broken by ascending id) so pages never reshuffle between
+        requests. The `after` cursor is the number of runs to skip from the
+        start of that order; runs are never deleted, so positions are
+        stable. A known thread without runs yields an empty `runs` array,
+        never an error; an unknown or foreign-tenant thread yields the
+        uniform 404 problem (no existence oracle, ADR-0004).
+      operationId: listThreadRuns
+      security: [{ bearerAuth: [] }]
+      parameters:
+        - $ref: "#/components/parameters/ThreadID"
+        - name: after
+          in: query
+          required: false
+          description: Return runs at position strictly greater than this value in the stable order
+          schema:
+            type: integer
+            format: int64
+            minimum: 0
+            default: 0
+      responses:
+        "200":
+          description: One bounded page of the thread's runs with the total count
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/RunPage"
+        "401":
+          $ref: "#/components/responses/Problem"
+        "404":
+          $ref: "#/components/responses/Problem"
     post:
       tags: [runs]
       summary: |
@@ -750,6 +785,20 @@ components:
         tasks:
           type: array
           items: { $ref: "#/components/schemas/Task" }
+
+    RunPage:
+      type: object
+      description: One page of a thread's run history in stable creation order
+      required: [runs, total]
+      properties:
+        runs:
+          type: array
+          items: { $ref: "#/components/schemas/Run" }
+        total:
+          type: integer
+          format: int64
+          minimum: 0
+          description: Total number of runs recorded for the thread
 
     Actor:
       type: object

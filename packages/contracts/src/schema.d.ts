@@ -158,7 +158,17 @@ export interface paths {
             path?: never;
             cookie?: never;
         };
-        get?: never;
+        /**
+         * List the runs of a thread
+         * @description Runs are returned oldest first in one stable order (creation time,
+         *     ties broken by ascending id) so pages never reshuffle between
+         *     requests. The `after` cursor is the number of runs to skip from the
+         *     start of that order; runs are never deleted, so positions are
+         *     stable. A known thread without runs yields an empty `runs` array,
+         *     never an error; an unknown or foreign-tenant thread yields the
+         *     uniform 404 problem (no existence oracle, ADR-0004).
+         */
+        get: operations["listThreadRuns"];
         put?: never;
         /**
          * Start a run for the thread. Requires an `Idempotency-Key`;
@@ -445,6 +455,15 @@ export interface components {
         RunWithTasks: {
             run: components["schemas"]["Run"];
             tasks: components["schemas"]["Task"][];
+        };
+        /** @description One page of a thread's run history in stable creation order */
+        RunPage: {
+            runs: components["schemas"]["Run"][];
+            /**
+             * Format: int64
+             * @description Total number of runs recorded for the thread
+             */
+            total: number;
         };
         Actor: {
             /** @enum {string} */
@@ -839,6 +858,33 @@ export interface operations {
                 };
             };
             400: components["responses"]["Problem"];
+            401: components["responses"]["Problem"];
+            404: components["responses"]["Problem"];
+        };
+    };
+    listThreadRuns: {
+        parameters: {
+            query?: {
+                /** @description Return runs at position strictly greater than this value in the stable order */
+                after?: number;
+            };
+            header?: never;
+            path: {
+                id: components["parameters"]["ThreadID"];
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description One bounded page of the thread's runs with the total count */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["RunPage"];
+                };
+            };
             401: components["responses"]["Problem"];
             404: components["responses"]["Problem"];
         };

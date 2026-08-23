@@ -13,6 +13,7 @@ export type Project = components["schemas"]["Project"];
 export type Thread = components["schemas"]["Thread"];
 export type Message = components["schemas"]["Message"];
 export type Run = components["schemas"]["Run"];
+export type RunPage = components["schemas"]["RunPage"];
 export type Task = components["schemas"]["Task"];
 export type RunReport = components["schemas"]["RunReport"];
 export type Event = components["schemas"]["Event"];
