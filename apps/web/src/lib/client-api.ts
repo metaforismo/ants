@@ -143,9 +143,10 @@ export const api = {
   // protection matters today (start-run); the BFF forwards it verbatim.
   startRun: (threadId: string, key: string) =>
     request<Run>(`threads/${encodeURIComponent(threadId)}/runs`, { method: "POST", idempotencyKey: key }),
-  // Oldest-first stable order, one bounded page per call; the newest run is
-  // the last element of the FINAL page, so consumers wanting it must walk
-  // to the end via listAllThreadRuns.
+  // Keyset pages in the store-assigned per-thread sequence order (true
+  // creation order); `after` is a seq value. The newest run is the last
+  // element of the FINAL page, so consumers wanting it must walk to the end
+  // via listAllThreadRuns.
   listThreadRuns: (threadId: string, after: number) =>
     request<RunPageResponse>(
       `threads/${encodeURIComponent(threadId)}/runs?after=${after}`,
@@ -162,10 +163,12 @@ export const api = {
 /**
  * The thread's complete run history, consumed page by page until the
  * authoritative `total` is exhausted; the last item of the returned list is
- * the true latest run however long the history is. One call per server
- * page, strictly sequential — callers get the whole history as a single
- * promise, so there is no client-side waterfall and no way for a render to
- * observe a partially walked history.
+ * the true latest run however long the history is. Each page resumes at the
+ * last run's store-assigned sequence, so concurrent starts (whatever their
+ * timestamps say) can only extend the tail. One call per server page,
+ * strictly sequential — callers get the whole history as a single promise,
+ * so there is no client-side waterfall and no way for a render to observe a
+ * partially walked history.
  */
 export function listAllThreadRuns(threadId: string): Promise<RunPage> {
   const id = encodeURIComponent(threadId);

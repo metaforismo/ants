@@ -19,8 +19,8 @@ const THREAD_LIVE = new Set(["planning", "executing", "reviewing", "fixing"]);
  * live event trail, and the terminal report are legible together.
  *
  * Which run to show is decided from server truth alone: the run-history
- * helper walks every positional page through the authoritative total, so
- * the history ends with the true latest run and reopening a thread here
+ * helper walks every keyset page through the authoritative total, so the
+ * history ends with the true latest run and reopening a thread here
  * reattaches to its live/latest run in any tab, on any device — even when
  * the history outgrows one server page. One React Query key owns the whole
  * traversal, so polling re-runs it as a single sequential request chain

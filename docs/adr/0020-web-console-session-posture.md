@@ -158,6 +158,23 @@ newest-last-on-purpose: positional offsets are stable precisely because new
 runs append only at the tail, which is why a newest-first + OFFSET shape
 was rejected.
 
+Update (2026-08-23, release-audit keyset migration): the previous update's
+stability argument was false and is superseded. Positional offsets over
+(created_at, id) are NOT guaranteed tail-append-stable: created_at comes
+from the service clock, and a clock rollback (NTP step correction, VM
+snapshot restore) lets a later-created run sort before an already-consumed
+offset, silently duplicating and omitting history entries and reattaching
+the console to a stale latest run. Run-history listing is therefore
+keyset-paginated over a store-assigned per-thread `seq`, allocated exactly
+once at insert time under the same serialization discipline as thread
+messages: the ordering key is immutable and append-stable by construction,
+independent of clock behavior. Clients pass the last observed run's `seq`
+back as `after`; the response shape (`{runs, total}`) and the strict cursor
+grammar are unchanged, while the shared `after` parameter now means "sequence
+value strictly greater" uniformly across runs, messages, and events.
+Migration 0009 backfills sequences in the historical (created_at, id) order,
+preserving every position previously observed.
+
 ## Non-goals
 
 - Memberships, roles, invitations, RBAC — the authorization model remains

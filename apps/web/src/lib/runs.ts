@@ -7,9 +7,9 @@ export function isTerminalRun(run: Pick<Run, "status">): boolean {
 }
 
 /**
- * The thread's newest run. The list endpoint serves the stable
- * oldest-first order, so a fully consumed history ends with the
- * live/latest run.
+ * The thread's newest run. The list endpoint serves the store-assigned
+ * per-thread sequence order (true creation order), so a fully consumed
+ * history ends with the live/latest run.
  */
 export function latestRun(runs: Run[]): Run | undefined {
   return runs.at(-1);
@@ -17,8 +17,8 @@ export function latestRun(runs: Run[]): Run | undefined {
 
 /**
  * Why a history traversal refused to continue. Every variant names a
- * violated invariant of the positional oldest-first pagination contract,
- * never a transient network condition (those surface as ApiClientError).
+ * violated invariant of the keyset oldest-first pagination contract, never
+ * a transient network condition (those surface as ApiClientError).
  */
 export type RunHistoryTraversalCode =
   | "no_progress"
@@ -49,14 +49,17 @@ export type CollectRunHistoryOptions = {
  * consumed, returning the full oldest-first history whose last item is the
  * true latest run.
  *
- * The server serves bounded positional pages in a stable order; runs are
- * never deleted and new runs append only at the tail, so resuming at the
- * count of already-consumed entries can neither duplicate nor skip — even
- * when `total` grows between page requests, which simply extends the walk
- * (bounded by maxGrowthSteps so a pathological writer cannot spin the loop
- * forever). Guards refuse to loop on contract violations instead: an empty
- * page before the end (no_progress), a repeated entry (duplicate_run), or a
- * total that drops below what was already collected (history_shrank).
+ * The server serves bounded keyset pages in the store-assigned per-thread
+ * sequence order (true creation order); each run's seq is allocated once at
+ * insert time and never changes, so resuming at the last consumed run's seq
+ * can neither duplicate nor skip — even when `total` grows between page
+ * requests, which simply extends the walk (bounded by maxGrowthSteps so a
+ * pathological writer cannot spin the loop forever), or when a clock
+ * rollback backdates a later-created run's created_at, which cannot affect
+ * its sequence. Guards refuse to loop on contract violations instead: an
+ * empty page before the end (no_progress), a repeated entry
+ * (duplicate_run), or a total that drops below what was already collected
+ * (history_shrank).
  */
 export async function collectRunHistory(
   fetchPage: (after: number) => Promise<RunPage>,
@@ -77,7 +80,8 @@ export async function collectRunHistory(
         `run history did not terminate after ${maxPages} pages`,
       );
     }
-    const result = await fetchPage(runs.length);
+    const last = runs.at(-1);
+    const result = await fetchPage(last ? last.seq : 0);
     const consumed = runs.length + result.runs.length;
     if (!Number.isSafeInteger(result.total) || result.total < consumed) {
       throw new RunHistoryTraversalError(
@@ -99,7 +103,7 @@ export async function collectRunHistory(
       if (seenIds.has(run.id)) {
         throw new RunHistoryTraversalError(
           "duplicate_run",
-          `run ${run.id} appeared twice while walking stable positional pages`,
+          `run ${run.id} appeared twice while walking sequence-keyed pages`,
         );
       }
       seenIds.add(run.id);
@@ -108,7 +112,7 @@ export async function collectRunHistory(
     if (result.runs.length === 0 && runs.length < total) {
       throw new RunHistoryTraversalError(
         "no_progress",
-        `server returned an empty page at after=${runs.length} with ${total - runs.length} runs outstanding`,
+        `server returned an empty page at after=${last ? last.seq : 0} with ${total - runs.length} runs outstanding`,
       );
     }
     if (runs.length >= total) {

@@ -160,12 +160,16 @@ export interface paths {
         };
         /**
          * List the runs of a thread
-         * @description Runs are returned oldest first in one stable order (creation time,
-         *     ties broken by ascending id). Runs are never deleted and new runs
-         *     arrive only at the tail, so positions never reshuffle: pages fetched
-         *     with increasing `after` cursors never duplicate or skip, even when
-         *     concurrent starts grow `total` between page requests. The newest run
-         *     is therefore the last item of the final page, not of the first one —
+         * @description Runs are returned oldest first in creation order, keyed by the
+         *     store-assigned per-thread `seq`: the sequence is allocated exactly
+         *     once when the run is created and never changes, so it is immutable
+         *     and append-stable by construction — independent of what any clock
+         *     did between insertions. Pages are keyset-paginated: pass the last
+         *     observed run's `seq` back as `after`, and pages fetched with
+         *     increasing cursors never duplicate or skip, even when concurrent
+         *     starts grow `total` between page requests or a clock rollback makes
+         *     a later-created row carry an earlier created_at. The newest run is
+         *     therefore the last item of the final page, not of the first one —
          *     clients wanting the true latest must walk pages until they have
          *     consumed `total` entries (the console does exactly this; it must not
          *     assume any single bounded page holds the latest run). A known thread
@@ -448,6 +452,13 @@ export interface components {
             spec_id?: components["schemas"]["SpecID"];
             status: components["schemas"]["RunStatus"];
             idempotency_key: string;
+            /**
+             * Format: int64
+             * @description Store-assigned per-thread sequence number, strictly increasing in
+             *     creation order and immutable afterwards. Pass the last run's seq
+             *     back as `after` to continue walking the history exactly there.
+             */
+            seq: number;
             task_ids: components["schemas"]["TaskID"][];
             report?: components["schemas"]["RunReport"];
             failure?: components["schemas"]["FailureInfo"];
@@ -461,7 +472,7 @@ export interface components {
             run: components["schemas"]["Run"];
             tasks: components["schemas"]["Task"][];
         };
-        /** @description One page of a thread's run history in stable creation order */
+        /** @description One keyset page of a thread's run history in creation order */
         RunPage: {
             runs: components["schemas"]["Run"][];
             /**
@@ -594,8 +605,12 @@ export interface components {
         TaskID: components["schemas"]["TaskID"];
         ArtifactID: components["schemas"]["ArtifactID"];
         /**
-         * @description Return entries at positions strictly greater than this value in the
-         *     stable oldest-first order. The grammar is exactly this schema
+         * @description Return entries whose sequence number is strictly greater than this
+         *     value in the listing's stable ascending order. Which sequence the
+         *     value belongs to is fixed per listing: thread runs use the
+         *     per-thread run sequence assigned by the store at creation time,
+         *     thread messages use the per-thread message sequence, and run events
+         *     use the tenant's event sequence. The grammar is exactly this schema
          *     (integer, minimum 0, default 0): omitted means 0; a present value
          *     must be a single decimal-digit integer (no sign, whitespace, or
          *     other padding) within the int64 range. Repeated, empty, or malformed
@@ -823,8 +838,12 @@ export interface operations {
         parameters: {
             query?: {
                 /**
-                 * @description Return entries at positions strictly greater than this value in the
-                 *     stable oldest-first order. The grammar is exactly this schema
+                 * @description Return entries whose sequence number is strictly greater than this
+                 *     value in the listing's stable ascending order. Which sequence the
+                 *     value belongs to is fixed per listing: thread runs use the
+                 *     per-thread run sequence assigned by the store at creation time,
+                 *     thread messages use the per-thread message sequence, and run events
+                 *     use the tenant's event sequence. The grammar is exactly this schema
                  *     (integer, minimum 0, default 0): omitted means 0; a present value
                  *     must be a single decimal-digit integer (no sign, whitespace, or
                  *     other padding) within the int64 range. Repeated, empty, or malformed
@@ -887,8 +906,12 @@ export interface operations {
         parameters: {
             query?: {
                 /**
-                 * @description Return entries at positions strictly greater than this value in the
-                 *     stable oldest-first order. The grammar is exactly this schema
+                 * @description Return entries whose sequence number is strictly greater than this
+                 *     value in the listing's stable ascending order. Which sequence the
+                 *     value belongs to is fixed per listing: thread runs use the
+                 *     per-thread run sequence assigned by the store at creation time,
+                 *     thread messages use the per-thread message sequence, and run events
+                 *     use the tenant's event sequence. The grammar is exactly this schema
                  *     (integer, minimum 0, default 0): omitted means 0; a present value
                  *     must be a single decimal-digit integer (no sign, whitespace, or
                  *     other padding) within the int64 range. Repeated, empty, or malformed
@@ -973,8 +996,12 @@ export interface operations {
         parameters: {
             query?: {
                 /**
-                 * @description Return entries at positions strictly greater than this value in the
-                 *     stable oldest-first order. The grammar is exactly this schema
+                 * @description Return entries whose sequence number is strictly greater than this
+                 *     value in the listing's stable ascending order. Which sequence the
+                 *     value belongs to is fixed per listing: thread runs use the
+                 *     per-thread run sequence assigned by the store at creation time,
+                 *     thread messages use the per-thread message sequence, and run events
+                 *     use the tenant's event sequence. The grammar is exactly this schema
                  *     (integer, minimum 0, default 0): omitted means 0; a present value
                  *     must be a single decimal-digit integer (no sign, whitespace, or
                  *     other padding) within the int64 range. Repeated, empty, or malformed

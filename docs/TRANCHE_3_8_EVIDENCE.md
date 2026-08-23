@@ -203,9 +203,10 @@ below are additive to the tranche record above.
   `RELEASE BLOCKER: single bounded page hides the true newest run
   run_eR4asC87Er1pSqeRqN1ri3hdlE behind older history; page starts at
   run_niXPAxbsFUWpYxCkYXvSnFelpg`
-  (archived at `.local/audit-3_8/gates/repro-fail.log`; re-confirmed fresh
-  after fixing the worktree's build errors in
-  `.local/audit-3_8/gates/prefix-repro-fresh.log`). The defect was real:
+  (archived at `.local/audit-3_8/gates/repro-fail.log`; a later focused
+  probe on the dirty tree recorded only the draft's compile errors, with no
+  runtime output, in `.local/audit-3_8/gates/prefix-repro-fresh.log` —
+  corrected by the release audit below). The defect was real:
   the console read exactly one page, so any thread with more runs than one
   bounded page reattached to a stale run.
 - **Correct cursor-validation direction**: negative/malformed/overflow
@@ -277,7 +278,7 @@ walk consumes the grown total within bounded guards instead of racing.
 
 | Gate | Command | Exit | Notes |
 |---|---|---|---|
-| Pre-fix reproduction (fresh) | focused `go test` on dirty tree | 1 | build errors first observed, then repro failure captured after compile fix |
+| Pre-fix reproduction (fresh) | focused `go test` on dirty tree | 1 | runtime RELEASE BLOCKER captured in `repro-fail.log` while the tree still compiled; a later probe captured only the draft's build errors (`prefix-repro-fresh.log`) — no fresh runtime reproduction exists beyond `repro-fail.log` (corrected by the release audit below) |
 | Focused Go (server+stores) post-fix | `go test -count=1 ./internal/server/ ./internal/store/...` | 0 | `.local/audit-3_8/gates/go-focused-fixed.log` |
 | Focused race post-fix | `go test -race` same packages | 0 | `.local/audit-3_8/gates/go-race-fixed.log` |
 | Web unit suite | `pnpm --filter @ants/web test` | 0 | 62 passed / 9 files (10 new traversal cases) |
@@ -297,3 +298,88 @@ verdicts ride hosted checks on the pushed head.
 - `RUN_HISTORY_MAX_PAGES`/`RUN_HISTORY_MAX_GROWTH_STEPS` are generous
   backstops, not licenses: a tenant genuinely outgrowing them gets a loud
   typed error in the runs panel, not silent truncation.
+
+---
+
+# Release-audit corrections — final PR #22 state (2026-08-23)
+
+This section supersedes the two addenda above wherever they describe the
+listing key: the release audit initially corrected wording while the runs
+listing still keyed on creation-time positions; the branch now ships the
+stronger design those corrections were pointing at, and this record describes
+that final state only. Reproduction provenance stays as the audit left it:
+the sole runtime reproduction of the single-page defect remains
+`.local/audit-3_8/gates/repro-fail.log` (`prefix-repro-fresh.log` holds only
+draft compile errors); nothing in this session re-reproduced or claims to
+have re-reproduced any defect.
+
+## Final design: dense per-thread sequence keyset (migration 0009)
+
+The intermediate oldest-first positional scheme (`created_at asc, id asc`,
+positions as cursors) is gone. Run history is now keyed by a store-assigned,
+per-thread dense `seq` allocated once at insert time and immutable after —
+the same append-stable posture thread messages already had, but immune even
+to clock rollback, which positional `created_at` could never claim.
+
+`db/migrations/0009_runs_seq.sql`, applied by the embedded migrator:
+
+1. adds `runs.seq BIGINT` nullable;
+2. backfills it per `(tenant_id, thread_id)` with `ROW_NUMBER()` in the
+   historical `(created_at asc, id asc)` order — the exact order every prior
+   reader observed, so existing consumers' expectations carry over;
+3. sets `seq NOT NULL`;
+4. pins density structurally with `CONSTRAINT runs_seq_positive CHECK
+   (seq >= 1)`;
+5. drops `runs_thread_idx` and creates `UNIQUE INDEX runs_thread_seq_idx ON
+   runs (tenant_id, thread_id, seq)`, making double allocation impossible
+   under concurrency.
+
+Allocation discipline mirrors messages: memory allocates under the same
+write lock as the insert (`internal/store/memory/runs.go`); PostgreSQL locks
+the parent thread row (`SELECT … FOR UPDATE`, now a row-fetching probe that
+can actually surface `sql.ErrNoRows`) and takes `MAX(seq)+1` inside the
+unit-of-work transaction (`internal/store/postgres/runs.go`). The OpenAPI
+`AfterCursor` description now states the per-listing cursor meaning exactly
+(runs = per-thread run seq; messages = message seq; events = event seq),
+`Run.seq` is a required response field, and contracts were regenerated.
+
+Because `runs` now carries two unique keys, idempotency conflicts are mapped
+by constraint name (`mapConstraintViolation` on
+`runs_tenant_id_thread_id_idempotency_key_key`, the auto-generated name of
+migration 0002's table constraint), never by bare SQLSTATE — a sequence-index
+breach can no longer masquerade as an idempotent replay.
+
+## Contract coverage added
+
+- `RunCreationOnUnknownThreadIsTypedInvalid`: creating a run for an
+  absent-thread and for another tenant's thread must yield typed invalid
+  `run_thread_unknown` in both adapters (never a leaked FK error, never a
+  silent orphan insert).
+- `MessageAppendOnUnknownThreadIsUniformNotFound`: appending to an absent or
+  foreign-tenant thread yields uniform not-found in both adapters — the case
+  the append's lock probe exists to detect before any seq allocation.
+- `RunListConcurrentTailGrowthNeverDuplicates` hardened against flake: an
+  empty page while writers are still running sleeps instead of busy-spinning
+  (a starved scheduler can no longer burn the convergence budget), and a
+  stall after writers settle fatals while surfacing the first writer error,
+  so failures name their cause instead of timing out.
+
+## Exact final gates (this session, all commands executed as shown)
+
+| Gate | Command | Exit | Result |
+|---|---|---|---|
+| Compile focused packages | `go build ./internal/store/... ./internal/domain/...` then `go vet` same scope | 0 | clean |
+| Focused tests | `go test -count=1 ./internal/store/storetest ./internal/store/memory ./internal/domain` | 0 | ok |
+| Focused race (server+stores+domain) | `go test -race -count=1 ./internal/store/... ./internal/domain ./internal/server` | 0 | all packages ok |
+| Store contract (memory), verbose | `go test -v -run TestMemoryStoreContract ./internal/store/storetest/` | 0 | 23/23 subtests PASS incl. the three above |
+| Web unit suite (standalone) | `npm test` in `apps/web` (vitest run) | 0 | Tests 64 passed (64) / Test Files 9 passed (9) |
+| Full hermetic CI | `. .local/gate-env.sh && env -u GOTOOLCHAIN make ci` | **0** | fmt-check, vet, staticcheck, tidy-check, manifest-check clean; Go unit + race all packages ok; build ok; contracts test + drift ok; web typecheck/lint/test/build ok; web tests 64 passed / 9 files |
+| Demo | `make demo` | 0 | deterministic vertical slice: 2/2 tasks integrated, 5 evidence records PASS, ready_for_review true |
+
+Docker-backed suites (`scripts/test-postgres.sh` migration integration,
+web-e2e, Keycloak) were NOT RUN locally this session: Docker use is excluded
+by session constraints, so the PostgreSQL rows of the new contract subtests
+and migration 0009 execution are exercised only by the hosted CI jobs on the
+pushed head SHA. Their verdicts are reported from the GitHub checks below,
+not claimed here. No defect reproduction was performed or implied beyond the
+historical artifacts already named.

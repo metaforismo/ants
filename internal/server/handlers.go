@@ -248,14 +248,17 @@ func (s *Server) handleListMessages(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"messages": messages, "total": total})
 }
 
-// handleListThreadRuns serves one page of the thread's run history in the
-// store's stable oldest-first (created_at asc, id asc) order. Runs append
-// only at the tail, so offsets never reshuffle; clients that need the true
-// latest run walk pages up to the authoritative `total` (see the console's
-// listAllThreadRuns) instead of relying on any single bounded page. The
-// store distinguishes an unknown or foreign-tenant thread (uniform 404,
-// ADR-0004) from a known thread whose page is simply empty, so no existence
-// oracle leaks here.
+// handleListThreadRuns serves one keyset page of the thread's run history in
+// the store-assigned per-thread sequence order (true creation order): only
+// runs whose sequence is strictly greater than `after` are returned. The
+// sequence is allocated once at insert time and never changes, so pages
+// fetched with increasing cursors never duplicate or skip regardless of
+// clock behavior; clients that need the true latest run walk pages up to the
+// authoritative `total`, passing the last observed run's seq back as `after`
+// (see the console's listAllThreadRuns) instead of relying on any single
+// bounded page. The store distinguishes an unknown or foreign-tenant thread
+// (uniform 404, ADR-0004) from a known thread whose page is simply empty, so
+// no existence oracle leaks here.
 func (s *Server) handleListThreadRuns(w http.ResponseWriter, r *http.Request) {
 	p := mustPrincipal(w, r)
 	if p == nil {
@@ -469,7 +472,7 @@ const defaultPageLimit = 200
 // a typed invalid_cursor problem rather than a silent fallback to the
 // default, so a client bug can never masquerade as "page from the start".
 // Leading zeros are accepted: the numeric value, not its notation,
-// identifies the offset.
+// identifies the cursor.
 func parseAfterCursor(r *http.Request) (int64, *domain.Error) {
 	values := r.URL.Query()["after"]
 	switch len(values) {

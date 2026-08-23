@@ -366,8 +366,8 @@ func (e *env) seedRunAt(t *testing.T, tenantSlug, threadID string, at time.Time)
 // so the empty case can pin "array, never JSON null".
 type runPage struct {
 	Runs *[]struct {
-		ID     string `json:"id"`
-		Status string `json:"status"`
+		ID  string `json:"id"`
+		Seq int64  `json:"seq"`
 	} `json:"runs"`
 	Total int64 `json:"total"`
 }
@@ -376,10 +376,10 @@ type runPage struct {
 // the release-blocking defect behind the console's reattachment claim: a
 // single bounded first page does NOT contain the newest run once history
 // outgrows the server page size (the pre-fix reproduction failed exactly
-// there), so clients must walk positional pages through the authoritative
-// total and take the last item of the final page as the true latest. This
-// test walks those pages black-box style: the server page size is derived
-// from the first response instead of duplicating internal constants.
+// there), so clients must walk keyset pages through the authoritative total
+// and take the last item of the final page as the true latest. This test
+// walks those pages black-box style: each resume cursor is the last
+// observed run's store-assigned sequence, exactly as the console does it.
 func TestListThreadRunsPaginationReachesTrueLatest(t *testing.T) {
 	// Comfortably above the server's bounded default page; if that limit is
 	// ever raised past this seed count, the tripwire below forces this test
@@ -408,18 +408,21 @@ func TestListThreadRunsPaginationReachesTrueLatest(t *testing.T) {
 		t.Fatalf("tripwire: server page limit no longer produces multiple pages for %d seeded runs (page length %d); raise the seed count", seeded, pageSize)
 	}
 	if (*first.Runs)[0].ID != ids[0] {
-		t.Fatalf("oldest-first contract drifted: first page starts at %s, want %s", (*first.Runs)[0].ID, ids[0])
+		t.Fatalf("creation-order contract drifted: first page starts at %s, want %s", (*first.Runs)[0].ID, ids[0])
 	}
 
-	// Walk pages exactly like the console helper: resume at the count of
-	// consumed entries until the authoritative total is exhausted.
+	// Walk pages exactly like the console helper: resume at the last
+	// consumed run's sequence value until the authoritative total is
+	// exhausted.
 	collected := map[string]bool{}
 	order := make([]string, 0, seeded)
+	cursor := int64(0)
 	for _, r := range *first.Runs {
 		collected[r.ID] = true
 		order = append(order, r.ID)
+		cursor = r.Seq
 	}
-	for cursor := int64(pageSize); int64(len(collected)) < first.Total; cursor = int64(len(collected)) {
+	for int64(len(collected)) < first.Total {
 		var page runPage
 		e.doJSON(t, http.MethodGet,
 			fmt.Sprintf("/v1/threads/%s/runs?after=%d", threadID, cursor),
@@ -432,10 +435,14 @@ func TestListThreadRunsPaginationReachesTrueLatest(t *testing.T) {
 		}
 		for _, r := range *page.Runs {
 			if collected[r.ID] {
-				t.Fatalf("positional oldest-first pages must never overlap: duplicate %s at after=%d", r.ID, cursor)
+				t.Fatalf("keyset pages must never overlap: duplicate %s at after=%d", r.ID, cursor)
+			}
+			if r.Seq <= cursor {
+				t.Fatalf("sequences must strictly increase across resumed pages: %d after cursor %d", r.Seq, cursor)
 			}
 			collected[r.ID] = true
 			order = append(order, r.ID)
+			cursor = r.Seq
 		}
 	}
 	if len(collected) != seeded {
@@ -443,6 +450,59 @@ func TestListThreadRunsPaginationReachesTrueLatest(t *testing.T) {
 	}
 	if order[len(order)-1] != newest {
 		t.Fatalf("true latest run must be the final item of the final page: got %s, want %s", order[len(order)-1], newest)
+	}
+}
+
+// TestListThreadRunsBackdatedCreationLandsAtTail pins the release-blocker
+// regression behind the keyset migration at the HTTP boundary: a run whose
+// created_at predates everything already listed (what a service-clock
+// rollback produces) still appears strictly AFTER all consumed history,
+// so a walking reader neither duplicates nor omits anything and reattaches
+// to the true latest run.
+func TestListThreadRunsBackdatedCreationLandsAtTail(t *testing.T) {
+	e := newEnv(t)
+	_, threadID := e.seedProjectThread(e.tenantAS)
+
+	now := time.Now().UTC()
+	first := e.seedRunAt(t, e.tenantAS, threadID, now.Add(-30*time.Second))
+	second := e.seedRunAt(t, e.tenantAS, threadID, now.Add(-20*time.Second))
+
+	var before runPage
+	e.doJSON(t, http.MethodGet, "/v1/threads/"+threadID+"/runs?after=0", e.tenantAS, nil, &before, http.StatusOK)
+	if before.Total != 2 || len(*before.Runs) != 2 {
+		t.Fatalf("initial history: %d runs (total %d), want 2", len(*before.Runs), before.Total)
+	}
+	consumedThroughSeq := (*before.Runs)[1].Seq
+
+	// The backdated insert: created BEFORE both listed runs' timestamps.
+	backdated := e.seedRunAt(t, e.tenantAS, threadID, now.Add(-60*time.Second))
+
+	var after runPage
+	e.doJSON(t, http.MethodGet,
+		fmt.Sprintf("/v1/threads/%s/runs?after=%d", threadID, consumedThroughSeq),
+		e.tenantAS, nil, &after, http.StatusOK)
+	if after.Total != 3 {
+		t.Fatalf("total must grow to %d after the backdated insert, got %d", 3, after.Total)
+	}
+	pageRuns := *after.Runs
+	if len(pageRuns) != 1 || pageRuns[0].ID != backdated {
+		t.Fatalf("resuming at seq %d must serve exactly the backdated run %s, got %+v",
+			consumedThroughSeq, backdated, pageRuns)
+	}
+
+	// A fresh walk covers every run exactly once, in insertion order, with
+	// the backdated run LAST — the latest run is the true latest.
+	var full runPage
+	e.doJSON(t, http.MethodGet, "/v1/threads/"+threadID+"/runs", e.tenantAS, nil, &full, http.StatusOK)
+	got := []string{}
+	for _, r := range *full.Runs {
+		got = append(got, r.ID)
+	}
+	want := []string{first, second, backdated}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("history position %d = %s, want %s (insertion order regardless of timestamps)", i, got[i], want[i])
+		}
 	}
 }
 

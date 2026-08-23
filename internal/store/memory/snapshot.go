@@ -21,6 +21,7 @@ type stateBackup struct {
 	tasks         map[domain.TaskID]*domain.Task
 	runs          map[domain.RunID]*domain.Run
 	runIdemKeys   map[idemKey]domain.RunID
+	runSeqs       map[domain.ThreadID]int64
 	workspaces    map[domain.WorkspaceID]*domain.Workspace
 	artifacts     map[domain.ArtifactID]*domain.Artifact
 	auditLog      []*domain.AuditEvent
@@ -50,6 +51,7 @@ func (st *storeState) backup() *stateBackup {
 		tasks:         make(map[domain.TaskID]*domain.Task, len(st.tasks)),
 		runs:          make(map[domain.RunID]*domain.Run, len(st.runs)),
 		runIdemKeys:   make(map[idemKey]domain.RunID, len(st.runIdemKeys)),
+		runSeqs:       make(map[domain.ThreadID]int64, len(st.runSeqs)),
 		workspaces:    make(map[domain.WorkspaceID]*domain.Workspace, len(st.workspaces)),
 		artifacts:     make(map[domain.ArtifactID]*domain.Artifact, len(st.artifacts)),
 		policyByRun:   make(map[domain.RunID][]*domain.PolicyDecision, len(st.policyByRun)),
@@ -121,6 +123,9 @@ func (st *storeState) backup() *stateBackup {
 	}
 	for k, v := range st.runIdemKeys {
 		b.runIdemKeys[k] = v
+	}
+	for k, v := range st.runSeqs {
+		b.runSeqs[k] = v
 	}
 	for k, v := range st.workspaces {
 		b.workspaces[k] = cloneWorkspace(v)
@@ -198,6 +203,12 @@ func (st *storeState) restore(b *stateBackup) {
 		freshIdem[k] = v
 	}
 	st.runIdemKeys = freshIdem
+
+	freshRunSeqs := make(map[domain.ThreadID]int64, len(b.runSeqs))
+	for k, v := range b.runSeqs {
+		freshRunSeqs[k] = v
+	}
+	st.runSeqs = freshRunSeqs
 
 	freshWorkspaces := make(map[domain.WorkspaceID]*domain.Workspace, len(b.workspaces))
 	for k, v := range b.workspaces {

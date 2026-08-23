@@ -8,27 +8,33 @@ import {
   latestRun,
 } from "@/lib/runs";
 
-function run(id: string): Run {
+function run(id: string, seq: number, createdAt = "2026-01-01T00:00:00Z"): Run {
   return {
     id,
     thread_id: "thr_test",
     spec_id: "",
     status: "completed",
     idempotency_key: `key-${id}`,
+    seq,
     task_ids: [],
     principal: "prn_test",
     version: 1,
-    created_at: "2026-01-01T00:00:00Z",
-    updated_at: "2026-01-01T00:00:00Z",
+    created_at: createdAt,
+    updated_at: createdAt,
   } as unknown as Run;
 }
 
-/** A deterministic oldest-first server: page size 2, fixed total. */
-function fixedServer(ids: string[], total = ids.length) {
+/**
+ * A deterministic keyset server: entries carry dense sequences 1..n in
+ * list order; `after` is a sequence value and only strictly-greater
+ * sequences are served (page size 2).
+ */
+function fixedServer(entries: Run[], total = entries.length) {
   const calls: number[] = [];
   const fetchPage = async (after: number): Promise<RunPage> => {
     calls.push(after);
-    return { runs: ids.slice(after, after + 2).map(run), total };
+    const page = entries.filter((r) => r.seq > after).slice(0, 2);
+    return { runs: page, total };
   };
   return { fetchPage, calls };
 }
@@ -36,18 +42,19 @@ function fixedServer(ids: string[], total = ids.length) {
 describe("collectRunHistory", () => {
   it("walks multiple bounded pages in order and ends on the true latest run", async () => {
     const ids = ["r1", "r2", "r3", "r4", "r5"];
-    const server = fixedServer(ids);
+    const server = fixedServer(ids.map((id, i) => run(id, i + 1)));
 
     const history = await collectRunHistory(server.fetchPage);
 
     expect(history.runs.map((r) => r.id)).toEqual(ids);
     expect(history.total).toBe(5);
     expect(latestRun(history.runs)?.id).toBe("r5");
+    // Cursors are the last consumed run's sequence value.
     expect(server.calls).toEqual([0, 2, 4]);
   });
 
   it("terminates exactly at an exact-multiple boundary without a wasted call", async () => {
-    const server = fixedServer(["r1", "r2", "r3", "r4"]);
+    const server = fixedServer(["r1", "r2", "r3", "r4"].map((id, i) => run(id, i + 1)));
 
     const history = await collectRunHistory(server.fetchPage);
 
@@ -66,23 +73,39 @@ describe("collectRunHistory", () => {
   });
 
   it("tolerates the total growing mid-traversal and consumes the grown tail", async () => {
-    // Page size 1: the server holds [r1, r2] when the walk starts, and a
-    // concurrent start appends r3 while the reader is between pages.
-    let collected = ["r1", "r2"];
+    // The server holds [r1(seq 1), r2(seq 2)] when the walk starts, and a
+    // concurrent start appends r3(seq 3) while the reader is between pages.
+    let entries = [run("r1", 1), run("r2", 2)];
     let total = 2;
-    const calls: number[] = [];
     const fetchPage = async (after: number): Promise<RunPage> => {
-      calls.push(after);
       if (after === 1) {
-        collected = [...collected, "r3"];
+        entries = [...entries, run("r3", 3)];
         total = 3;
       }
-      return { runs: collected.slice(after, after + 1).map(run), total };
+      return { runs: entries.filter((r) => r.seq > after).slice(0, 1), total };
     };
 
     const history = await collectRunHistory(fetchPage);
 
     expect(history.total).toBe(3);
+    expect(history.runs.map((r) => r.id)).toEqual(["r1", "r2", "r3"]);
+    expect(latestRun(history.runs)?.id).toBe("r3");
+  });
+
+  it("keeps a clock-rollback run at the tail instead of duplicating consumed history", async () => {
+    // r3 was created after r1/r2 but its created_at is BACKDATED by a clock
+    // rollback. Its sequence still sorts it last, so the walk must neither
+    // reorder nor duplicate anything — the regression test for the
+    // positional-offset defect this traversal replaced.
+    const entries = [
+      run("r1", 1, "2026-01-01T00:00:10Z"),
+      run("r2", 2, "2026-01-01T00:00:20Z"),
+      run("r3", 3, "2026-01-01T00:00:05Z"),
+    ];
+    const server = fixedServer(entries);
+
+    const history = await collectRunHistory(server.fetchPage);
+
     expect(history.runs.map((r) => r.id)).toEqual(["r1", "r2", "r3"]);
     expect(latestRun(history.runs)?.id).toBe("r3");
   });
@@ -97,11 +120,32 @@ describe("collectRunHistory", () => {
   });
 
   it("refuses overlapping pages instead of silently deduplicating them", async () => {
-    // A reshuffled (non-positional) server resends r2 on the second page.
+    // A misbehaving server resends the same row on the second page.
     const fetchPage = async (after: number): Promise<RunPage> =>
       after === 0
-        ? { runs: [run("r1"), run("r2")], total: 3 }
-        : { runs: [run("r2")], total: 3 };
+        ? { runs: [run("r1", 1), run("r2", 2)], total: 3 }
+        : { runs: [run("r2", 2)], total: 3 };
+
+    await expect(collectRunHistory(fetchPage)).rejects.toMatchObject({
+      name: "RunHistoryTraversalError",
+      code: "duplicate_run",
+    });
+  });
+
+  it("refuses a server that reshuffles already-consumed sequences between pages", async () => {
+    // Sequence numbers are immutable per the contract; a server that
+    // prepends a run and renumbers everything afterwards drags an already
+    // collected entry back above the cursor, exactly like a head insertion
+    // broke positional offsets. The walk must refuse, not deduplicate.
+    let shifted = false;
+    const fetchPage = async (after: number): Promise<RunPage> => {
+      if (!shifted) {
+        shifted = true;
+        return { runs: [run("r0", 1), run("r1", 2)], total: 3 };
+      }
+      const renumbered = [run("rx", 1), run("r0", 2), run("r1", 3)];
+      return { runs: renumbered.filter((r) => r.seq > after).slice(0, 2), total: 3 };
+    };
 
     await expect(collectRunHistory(fetchPage)).rejects.toMatchObject({
       name: "RunHistoryTraversalError",
@@ -113,9 +157,9 @@ describe("collectRunHistory", () => {
     let calls = 0;
     const fetchPage = async (): Promise<RunPage> => {
       calls++;
-      if (calls === 1) return { runs: [run("r1"), run("r2")], total: 4 };
+      if (calls === 1) return { runs: [run("r1", 1), run("r2", 2)], total: 4 };
       // The page still serves r3, but claims a total that cannot hold it.
-      return { runs: [run("r3")], total: 2 };
+      return { runs: [run("r3", 3)], total: 2 };
     };
 
     await expect(collectRunHistory(fetchPage)).rejects.toMatchObject({
@@ -141,7 +185,7 @@ describe("collectRunHistory", () => {
       served++;
       // Every page serves one real entry but claims there is always one
       // more outstanding, so the walk never catches up on progress alone.
-      return { runs: [run(`r${served}`)], total: served + 1 };
+      return { runs: [run(`r${served}`, served)], total: served + 1 };
     };
 
     await expect(
@@ -151,7 +195,7 @@ describe("collectRunHistory", () => {
 
   it("honours the absolute page cap as the final backstop", async () => {
     const fetchPage = async (after: number): Promise<RunPage> => ({
-      runs: [run(`r${after}`)],
+      runs: [run(`r${after}`, after + 1)],
       total: Number.MAX_SAFE_INTEGER,
     });
 
