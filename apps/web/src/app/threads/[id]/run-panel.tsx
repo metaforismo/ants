@@ -81,12 +81,12 @@ export function RunPanel({ runId }: { runId: string }) {
         {run && !TERMINAL_RUN.has(run.status) ? <CancelButton runId={run.id} /> : null}
       </header>
 
-      {data.tasks.length > 0 ? (
+      {(data.tasks ?? []).length > 0 ? (
         <ul
           data-testid="task-list"
           style={{ listStyle: "none", margin: "0 0 12px", padding: 0, display: "grid", gap: 6 }}
         >
-          {data.tasks.map((task) => (
+          {(data.tasks ?? []).map((task) => (
             <li
               key={task.id}
               style={{

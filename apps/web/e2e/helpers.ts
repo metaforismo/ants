@@ -27,7 +27,9 @@ export async function loginViaKeycloak(page: Page): Promise<void> {
   await page.locator("#password").fill(FIXTURE_PASSWORD);
   await page.getByRole("button", { name: "Sign In" }).click();
 
-  await page.waitForURL(/\/threads$/, { timeout: 30_000 });
+  // First concurrent logins against a freshly imported realm can be slow;
+  // a genuine refusal lands on /login?error=… and fails the URL wait anyway.
+  await page.waitForURL(/\/threads$/, { timeout: 90_000 });
 }
 
 /** Revokes every server-side session for the fixture user via the admin API. */

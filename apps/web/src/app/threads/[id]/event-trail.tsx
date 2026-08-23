@@ -29,16 +29,16 @@ export function EventTrail({ runId, active }: { runId: string; active: boolean }
         const page = await api.listRunEvents(runId, cursor.current);
         if (cancelled) return;
         setFailed(undefined);
-        if (page.events.length > 0) {
-          const lastSeq = page.events[page.events.length - 1]?.seq ?? cursor.current;
+        const fresh = page.events ?? [];
+        if (fresh.length > 0) {
+          const lastSeq = fresh[fresh.length - 1]?.seq ?? cursor.current;
           if (lastSeq > cursor.current) {
             cursor.current = lastSeq;
             setLastSeq(lastSeq);
           }
           setEvents((prev) => {
             const seen = new Set(prev.map((e) => e.id));
-            const fresh = page.events.filter((e) => !seen.has(e.id));
-            return [...prev, ...fresh].slice(-MAX_RENDERED);
+            return [...prev, ...fresh.filter((e) => !seen.has(e.id))].slice(-MAX_RENDERED);
           });
         }
       } catch (err) {

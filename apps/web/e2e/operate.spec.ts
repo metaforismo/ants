@@ -23,11 +23,11 @@ test.describe("operate journey", () => {
 
     await page
       .getByLabel("Outcome")
-      .fill(`Add a greeting module for e2e-${suffix}`);
+      .fill(`Add and multiply integers for e2e-${suffix}`);
     await page.getByRole("button", { name: "Open thread" }).click();
 
     // --- workspace opens on the fresh thread ---
-    await expect(page.getByRole("heading", { name: /greeting module/i })).toBeVisible({
+    await expect(page.getByRole("heading", { name: /add and multiply/i })).toBeVisible({
       timeout: 20_000,
     });
     await expect(page.getByTestId("messages-empty")).toContainText("No messages yet");
@@ -35,9 +35,9 @@ test.describe("operate journey", () => {
     // --- describe the outcome ---
     await page
       .getByTestId("composer")
-      .fill(`Please add a small greeting module named e2e-${suffix}.`);
+      .fill(`Please add and multiply integers for e2e-${suffix}.`);
     await page.getByTestId("send-message").click();
-    await expect(page.getByTestId("message-list")).toContainText("greeting module", {
+    await expect(page.getByTestId("message-list")).toContainText("add and multiply integers", {
       timeout: 15_000,
     });
 

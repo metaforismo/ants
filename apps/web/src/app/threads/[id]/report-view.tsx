@@ -43,6 +43,12 @@ export function ReportView({ runId }: { runId: string }) {
   }
 
   const report = reportQuery.data;
+  // Go-side nil slices marshal as JSON null even where the generated type
+  // says array; normalize once here instead of trusting every emitter.
+  const evidence = report.verification?.evidence ?? [];
+  const findings = report.findings ?? [];
+  const tasks = report.tasks ?? [];
+  const artifacts = report.artifacts ?? [];
   return (
     <article data-testid="run-report" style={{ marginTop: 16, borderTop: "1px solid var(--hairline)", paddingTop: 12 }}>
       <header style={{ display: "flex", gap: 10, alignItems: "center", flexWrap: "wrap", marginBottom: 8 }}>
@@ -71,7 +77,7 @@ export function ReportView({ runId }: { runId: string }) {
 
       <section>
         <h4>Verification</h4>
-        {report.verification.evidence.length === 0 ? (
+        {evidence.length === 0 ? (
           <p style={{ color: "var(--ink-2)" }}>No verification evidence recorded.</p>
         ) : (
           <table className="evidence-table">
@@ -84,7 +90,7 @@ export function ReportView({ runId }: { runId: string }) {
               </tr>
             </thead>
             <tbody>
-              {report.verification.evidence.map((row) => (
+              {evidence.map((row) => (
                 <tr key={`${row.criterion}-${row.at}`}>
                   <td>{row.criterion}</td>
                   <td className="mono">{row.command.join(" ")}</td>
@@ -99,11 +105,11 @@ export function ReportView({ runId }: { runId: string }) {
         )}
       </section>
 
-      {report.findings.length > 0 ? (
+      {findings.length > 0 ? (
         <section>
           <h4>Findings</h4>
           <ul style={{ margin: 0, paddingLeft: 18 }}>
-            {report.findings.map((finding) => (
+            {findings.map((finding) => (
               <li key={`${finding.category}-${finding.location}`} style={{ marginBottom: 4 }}>
                 <strong>{finding.severity}</strong> · {finding.category} at{" "}
                 <span className="mono">{finding.location}</span> — {finding.scenario}
@@ -116,7 +122,7 @@ export function ReportView({ runId }: { runId: string }) {
       <section>
         <h4>Tasks</h4>
         <ul style={{ margin: 0, paddingLeft: 18 }}>
-          {report.tasks.map((task) => (
+          {tasks.map((task) => (
             <li key={task.id} style={{ marginBottom: 2 }}>
               {task.name} — {task.status.replaceAll("_", " ")}
               {task.attempts > 1 ? ` (attempt ${task.attempts})` : null}
@@ -134,7 +140,7 @@ export function ReportView({ runId }: { runId: string }) {
       <p className="row-meta mono" style={{ marginTop: 8 }}>
         budget {report.budget.tasks_used}/{report.budget.max_tasks} tasks ·{" "}
         {report.budget.exec_ops_used}/{report.budget.max_exec_ops} exec ops ·{" "}
-        {report.artifacts.length} artifact{report.artifacts.length === 1 ? "" : "s"}
+        {artifacts.length} artifact{artifacts.length === 1 ? "" : "s"}
       </p>
     </article>
   );
