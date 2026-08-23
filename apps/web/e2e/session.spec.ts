@@ -4,7 +4,10 @@ import {
   loginViaKeycloak,
   revokeKeycloakSessions,
   sessionProbe,
-  FIXTURE_USER,
+  RENEW_USER,
+  RENEW_PASSWORD,
+  REVOKE_USER,
+  REVOKE_PASSWORD,
 } from "./helpers";
 
 test.describe("session security states", () => {
@@ -38,7 +41,10 @@ test.describe("session security states", () => {
 test.describe("token lifecycle against the real provider", () => {
   test("expired access tokens renew silently through the BFF", async ({ page }) => {
     test.setTimeout(240_000);
-    await loginViaKeycloak(page);
+    await loginViaKeycloak(page, {
+      username: RENEW_USER,
+      password: RENEW_PASSWORD,
+    });
 
     const first = await sessionProbe(page);
     expect(first.status).toBe("authenticated");
@@ -64,10 +70,13 @@ test.describe("token lifecycle against the real provider", () => {
 
   test("a revoked provider session degrades to the re-authentication card", async ({ page }) => {
     test.setTimeout(300_000);
-    await loginViaKeycloak(page);
+    await loginViaKeycloak(page, {
+      username: REVOKE_USER,
+      password: REVOKE_PASSWORD,
+    });
     await expect(page.getByTestId("new-thread")).toBeVisible();
 
-    await revokeKeycloakSessions(FIXTURE_USER);
+    await revokeKeycloakSessions(REVOKE_USER);
 
     // After the current access token lapses, refresh must fail with
     // invalid_grant; the console then shows the re-auth state instead of

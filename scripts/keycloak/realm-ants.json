@@ -230,6 +230,42 @@
           "temporary": false
         }
       ]
+    },
+    {
+      "username": "bob",
+      "enabled": true,
+      "email": "bob@fixture.local",
+      "emailVerified": true,
+      "firstName": "Bob",
+      "lastName": "Fixture",
+      "attributes": {
+        "ants_tenant": ["acme"]
+      },
+      "credentials": [
+        {
+          "type": "password",
+          "value": "fixture-bob-password",
+          "temporary": false
+        }
+      ]
+    },
+    {
+      "username": "carol",
+      "enabled": true,
+      "email": "carol@fixture.local",
+      "emailVerified": true,
+      "firstName": "Carol",
+      "lastName": "Fixture",
+      "attributes": {
+        "ants_tenant": ["acme"]
+      },
+      "credentials": [
+        {
+          "type": "password",
+          "value": "fixture-carol-password",
+          "temporary": false
+        }
+      ]
     }
   ]
 }

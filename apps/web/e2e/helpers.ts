@@ -9,11 +9,26 @@ import { execFileSync } from "node:child_process";
 export const FIXTURE_USER = "alice";
 export const FIXTURE_PASSWORD = "fixture-alice-password";
 
+// Lifecycle tests revoke sessions and wait out token lifespans; each gets a
+// dedicated identity so concurrent tests never share provider state
+// (a user-wide revocation would kill every parallel session of the same
+// user, not just its own).
+export const RENEW_USER = "bob";
+export const RENEW_PASSWORD = "fixture-bob-password";
+export const REVOKE_USER = "carol";
+export const REVOKE_PASSWORD = "fixture-carol-password";
+
 const KEYCLOAK = process.env.ANTS_E2E_ISSUER ?? "http://127.0.0.1:54331/realms/ants";
 const KEYCLOAK_ADMIN = new URL(KEYCLOAK).origin;
 
 /** Drives the real Keycloak login form (Authorization Code + PKCE round trip). */
-export async function loginViaKeycloak(page: Page): Promise<void> {
+export async function loginViaKeycloak(
+  page: Page,
+  user: { username: string; password: string } = {
+    username: FIXTURE_USER,
+    password: FIXTURE_PASSWORD,
+  },
+): Promise<void> {
   await page.goto("/login");
   await expect(page.getByTestId("login-button")).toBeVisible();
   await page.getByTestId("login-button").click();
@@ -23,8 +38,8 @@ export async function loginViaKeycloak(page: Page): Promise<void> {
   });
   // Keycloak's login theme labels more than one control with accessible
   // text containing these words; the field ids are the stable contract.
-  await page.locator("#username").fill(FIXTURE_USER);
-  await page.locator("#password").fill(FIXTURE_PASSWORD);
+  await page.locator("#username").fill(user.username);
+  await page.locator("#password").fill(user.password);
   await page.getByRole("button", { name: "Sign In" }).click();
 
   // First concurrent logins against a freshly imported realm can be slow;
