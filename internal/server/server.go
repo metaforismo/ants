@@ -1,7 +1,6 @@
-// Package server exposes the versioned /v1 HTTP API for the tranche 1
-// vertical slice. Handlers are thin adapters over domain stores and the
-// orchestration engine; authentication is pluggable and dev-only mode is an
-// explicit configuration decision.
+// Package server exposes the versioned /v1 HTTP API. Handlers are thin
+// adapters over domain stores and the orchestration engine; authentication is
+// injected and refuses protected traffic unless an OIDC verifier is configured.
 package server
 
 import (

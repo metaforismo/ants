@@ -396,7 +396,50 @@ p {
   background: #eef4fd;
 }
 
+.banner-info {
+  border-color: var(--accent);
+  color: var(--accent);
+  background: var(--accent-wash);
+}
+
 /* ---- conversation / workspace ---- */
+
+.run-list {
+  max-height: 340px;
+  overflow-y: auto;
+}
+
+.run-row {
+  display: grid;
+  grid-template-columns: auto auto minmax(0, 1fr) minmax(0, auto);
+  gap: 4px 12px;
+  align-items: center;
+  width: 100%;
+  font: inherit;
+  text-align: left;
+  background: none;
+  border: 0;
+  border-top: 1px solid var(--surface-sunken);
+  padding: 8px 6px;
+  cursor: pointer;
+}
+
+.run-row:hover {
+  background: var(--accent-wash);
+}
+
+.run-row[aria-current="true"] {
+  background: var(--accent-wash);
+  box-shadow: inset 2px 0 0 var(--accent);
+}
+
+.run-row-id {
+  color: var(--ink-3);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  justify-self: end;
+}
 
 .message {
   border: 1px solid var(--hairline);
@@ -504,6 +547,16 @@ p {
   }
 
   .row-updated {
+    display: none;
+  }
+
+  /* Compact navigator rows: seq, status, and time survive; the run id is
+     one selection away in the panel header instead of crowding 360px. */
+  .run-row {
+    grid-template-columns: auto auto minmax(0, 1fr);
+  }
+
+  .run-row-id {
     display: none;
   }
 }

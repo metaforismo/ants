@@ -60,22 +60,31 @@ func newPrefixed(prefix, suffix string) string {
 	return prefix + idSeparator + suffix
 }
 
+// CodeInvalidID is the stable problem code for every identifier that fails
+// its grammar. Callers at trust boundaries (HTTP handlers above all) rely on
+// these failures being taxonomy-typed invalid requests — a malformed path or
+// body id is client error 400, never a wrapped internal 500.
+const CodeInvalidID = "invalid_id"
+
+// validatePrefixed enforces the "<prefix>_<suffix>" identifier grammar and
+// returns a taxonomy-typed invalid error so every Parse failure maps onto
+// the same HTTP classification wherever it crosses a trust boundary.
 func validatePrefixed(kindName, prefix, value string) (string, error) {
 	if value == "" {
-		return "", fmt.Errorf("%s id is empty", kindName)
+		return "", Invalidf(CodeInvalidID, "%s id is empty", kindName)
 	}
 	gotPrefix, suffix, ok := strings.Cut(value, idSeparator)
 	if !ok || gotPrefix != prefix {
-		return "", fmt.Errorf("%s id %q must have prefix %q", kindName, value, prefix)
+		return "", Invalidf(CodeInvalidID, "%s id %q must have prefix %q", kindName, value, prefix)
 	}
 	if len(suffix) < minIDRandomChars || len(suffix) > maxIDSuffixLen {
-		return "", fmt.Errorf("%s id %q suffix length must be between %d and %d", kindName, value, minIDRandomChars, maxIDSuffixLen)
+		return "", Invalidf(CodeInvalidID, "%s id %q suffix length must be between %d and %d", kindName, value, minIDRandomChars, maxIDSuffixLen)
 	}
 	for _, r := range suffix {
 		switch {
 		case r >= 'a' && r <= 'z', r >= 'A' && r <= 'Z', r >= '0' && r <= '9':
 		default:
-			return "", fmt.Errorf("%s id %q contains invalid character %q", kindName, value, r)
+			return "", Invalidf(CodeInvalidID, "%s id %q contains invalid character %q", kindName, value, r)
 		}
 	}
 	return value, nil

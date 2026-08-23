@@ -3,6 +3,23 @@
 Status: accepted
 Date: 2026-08-22
 
+## Current clarification (2026-08-24)
+
+The title and original context record the first tranche. ADR-0019 superseded
+the development-auth portion: the header authenticator and its configuration
+were deleted, protected routes now verify OIDC bearer tokens or refuse with
+`authentication_not_configured`, and authentication runs before resource-ID
+parsing.
+
+Uniform not-found applies to **well-formed** IDs whose resource is absent or
+belongs to another tenant, across reads and mutations. An authenticated request
+with an ID that violates the public prefix/suffix grammar is instead a typed
+`400 invalid_id` client error; this exposes syntax only and creates no resource
+existence oracle. Project isolation is exercised through the real
+`POST /v1/threads` body reference rather than a nonexistent project-detail
+route. Domain, API, cross-tenant, and OpenAPI contract tests pin these
+distinctions.
+
 ## Context
 
 The plan mandates tenant-scoped IDs, ownership, quotas, policy, audit, and

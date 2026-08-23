@@ -57,5 +57,16 @@ test.describe("operate journey", () => {
     await expect(report.getByText("Verification")).toBeVisible();
     await expect(report.locator(".evidence-table tbody tr").first()).toBeVisible();
     await expect(report.getByText(/passed|failed/).first()).toBeVisible();
+
+    // The real run-history component remains operable at the narrow layout:
+    // the exact id moves to the selected panel and the document never overflows.
+    await page.setViewportSize({ width: 390, height: 844 });
+    const history = page.getByTestId("run-history");
+    await expect(history).toBeVisible();
+    await expect(history.locator(".run-row-id")).toBeHidden();
+    const overflow = await page.evaluate(
+      () => document.documentElement.scrollWidth - document.documentElement.clientWidth,
+    );
+    expect(overflow).toBeLessThanOrEqual(1);
   });
 });

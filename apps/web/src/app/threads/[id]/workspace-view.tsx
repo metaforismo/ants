@@ -5,18 +5,20 @@ import { useRef, useState } from "react";
 
 import { Composer } from "@/app/threads/[id]/composer";
 import { MessageList } from "@/app/threads/[id]/message-list";
+import { RunHistoryNavigator } from "@/app/threads/[id]/run-history";
 import { RunPanel } from "@/app/threads/[id]/run-panel";
 import { ExpiredNotice, humanStatus } from "@/app/threads/threads-view";
 import { StatusBadge } from "@/components/status-badge";
 import { api, errorCode, listAllThreadRuns } from "@/lib/client-api";
-import { isTerminalRun, latestRun } from "@/lib/runs";
+import { isTerminalRun, latestRun, resolveSelectedRun } from "@/lib/runs";
 import { threadKind } from "@/lib/status";
 
 const THREAD_LIVE = new Set(["planning", "executing", "reviewing", "fixing"]);
 
 /**
- * Thread workspace: the one screen where the conversation, its runs, the
- * live event trail, and the terminal report are legible together.
+ * Thread workspace: the one screen where the conversation, the run-history
+ * navigator, and any selected run's live event trail and terminal report
+ * are legible together.
  *
  * Which run to show is decided from server truth alone: the run-history
  * helper walks every keyset page through the authoritative total, so the
@@ -25,9 +27,16 @@ const THREAD_LIVE = new Set(["planning", "executing", "reviewing", "fixing"]);
  * the history outgrows one server page. One React Query key owns the whole
  * traversal, so polling re-runs it as a single sequential request chain
  * with no duplicate concurrent calls.
+ *
+ * Selection follows one deterministic rule set (resolveSelectedRun): by
+ * default the panel shows and tracks the newest run; selecting a row in the
+ * navigator pins that exact run — later polls may discover newer runs but
+ * never move the pin, surfacing a "newer runs" notice instead — and
+ * releasing the pin (or starting a run) returns to following the latest.
  */
 export function WorkspaceView({ threadId }: { threadId: string }) {
   const queryClient = useQueryClient();
+  const [pinnedRunId, setPinnedRunId] = useState<string | undefined>(undefined);
 
   const threadQuery = useQuery({
     queryKey: ["thread", threadId],
@@ -105,38 +114,58 @@ export function WorkspaceView({ threadId }: { threadId: string }) {
         </section>
       );
   } else {
-    const newest = latestRun(runsQuery.data?.runs ?? []);
-    runSection = newest ? (
-      <RunPanel runId={newest.id} />
-    ) : (
-      <section aria-label="Start a run" className="card" style={{ padding: 16 }}>
-        <div
-          style={{
-            display: "flex",
-            alignItems: "center",
-            justifyContent: "space-between",
-            gap: 12,
-            flexWrap: "wrap",
-          }}
-        >
-          <p style={{ margin: 0, color: "var(--ink-2)" }}>
-            {messages.length === 0
-              ? "Describe the outcome below; then start a run to delegate it."
-              : "No runs yet. The described outcome is ready to be delegated."}
-          </p>
-          {!threadLive ? (
-            <StartRunButton
-              threadId={threadId}
-              hasMessages={messages.length > 0}
-              onStarted={() => {
-                void queryClient.invalidateQueries({ queryKey: ["thread-runs", threadId] });
-                void queryClient.invalidateQueries({ queryKey: ["thread", threadId] });
-              }}
-            />
-          ) : null}
-        </div>
-      </section>
-    );
+    const runs = runsQuery.data?.runs ?? [];
+    const selected = resolveSelectedRun(runs, pinnedRunId);
+    if (!selected) {
+      runSection = (
+        <section aria-label="Start a run" className="card" style={{ padding: 16 }}>
+          <div
+            style={{
+              display: "flex",
+              alignItems: "center",
+              justifyContent: "space-between",
+              gap: 12,
+              flexWrap: "wrap",
+            }}
+          >
+            <p style={{ margin: 0, color: "var(--ink-2)" }}>
+              {messages.length === 0
+                ? "Describe the outcome below; then start a run to delegate it."
+                : "No runs yet. The described outcome is ready to be delegated."}
+            </p>
+            {!threadLive ? (
+              <StartRunButton
+                threadId={threadId}
+                hasMessages={messages.length > 0}
+                onStarted={() => {
+                  setPinnedRunId(undefined);
+                  void queryClient.invalidateQueries({ queryKey: ["thread-runs", threadId] });
+                  void queryClient.invalidateQueries({ queryKey: ["thread", threadId] });
+                }}
+              />
+            ) : null}
+          </div>
+        </section>
+      );
+    } else {
+      runSection = (
+        <>
+          <RunHistoryNavigator
+            runs={runs}
+            selectedRunId={selected.id}
+            selectionMode={
+              pinnedRunId !== undefined && pinnedRunId === selected.id
+                ? "pinned"
+                : "follow-latest"
+            }
+            onSelect={setPinnedRunId}
+          />
+          {/* Remount per run so panel-local state (event cursor, cancel
+              request) can never leak across a selection switch. */}
+          <RunPanel key={selected.id} runId={selected.id} />
+        </>
+      );
+    }
   }
 
   return (

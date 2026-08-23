@@ -246,6 +246,60 @@ func TestIDValidation(t *testing.T) {
 	}
 }
 
+// TestIDParseFailuresAreTypedInvalid pins the trust-boundary contract every
+// /v1 handler leans on: a malformed identifier parses into a taxonomy-typed
+// invalid error with the stable invalid_id code — never a plain error that
+// would wrap into an internal 500 (asDomainError only passes *Error through).
+func TestIDParseFailuresAreTypedInvalid(t *testing.T) {
+	cases := []struct {
+		name  string
+		parse func(string) error
+	}{
+		{"tenant", func(v string) error { _, err := ParseTenantID(v); return err }},
+		{"project", func(v string) error { _, err := ParseProjectID(v); return err }},
+		{"thread", func(v string) error { _, err := ParseThreadID(v); return err }},
+		{"message", func(v string) error { _, err := ParseMessageID(v); return err }},
+		{"spec", func(v string) error { _, err := ParseSpecID(v); return err }},
+		{"task", func(v string) error { _, err := ParseTaskID(v); return err }},
+		{"run", func(v string) error { _, err := ParseRunID(v); return err }},
+		{"workspace", func(v string) error { _, err := ParseWorkspaceID(v); return err }},
+		{"artifact", func(v string) error { _, err := ParseArtifactID(v); return err }},
+		{"policy decision", func(v string) error { _, err := ParsePolicyDecisionID(v); return err }},
+		{"budget", func(v string) error { _, err := ParseBudgetID(v); return err }},
+		{"integration", func(v string) error { _, err := ParseIntegrationID(v); return err }},
+		{"audit event", func(v string) error { _, err := ParseAuditEventID(v); return err }},
+		{"principal", func(v string) error { _, err := ParsePrincipalID(v); return err }},
+		{"sandbox", func(v string) error { _, err := ParseSandboxID(v); return err }},
+		{"event", func(v string) error { _, err := ParseEventID(v); return err }},
+	}
+	bad := map[string]string{
+		"empty":          "",
+		"wrong prefix":   "zzz_abcdefghijklmnopqrst",
+		"suffix short":   "thr_short",
+		"bad char":       "thr_abcdefghijklmnopqrs!",
+		"no separator":   "thr-abcdefghijklmnopqrst",
+		"path traversal": "../etc/passwd",
+		"url encoded":    "thr_%41bcdefghijklmnopqrst",
+	}
+	for _, tc := range cases {
+		for badName, value := range bad {
+			err := tc.parse(value)
+			if err == nil {
+				t.Errorf("%s: %s %q must be rejected", tc.name, badName, value)
+				continue
+			}
+			var dom *Error
+			if !errors.As(err, &dom) {
+				t.Errorf("%s: %s must fail typed, got %T (%v)", tc.name, badName, err, err)
+				continue
+			}
+			if dom.Kind != ErrKindInvalid || dom.Code != CodeInvalidID {
+				t.Errorf("%s: %s must be invalid/%s, got %s/%s (%v)", tc.name, badName, CodeInvalidID, dom.Kind, dom.Code, err)
+			}
+		}
+	}
+}
+
 func TestSlugValidation(t *testing.T) {
 	valid := []string{"acme", "acme-corp", "team42"}
 	for _, s := range valid {

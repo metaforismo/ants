@@ -2,12 +2,13 @@
 
 > **Ants** richiama una colonia di agenti specializzati che pianificano, collaborano e portano a termine lavori complessi. Prima del lancio commerciale servono comunque ricerca marchi, dominio, package name, handle social e confronto linguistico internazionale.
 
-**Stato:** piano di prodotto e implementazione v1  
-**Data:** 22 agosto 2026  
-**Licenza prevista:** Apache-2.0  
-**Modello:** tutto il prodotto open source; servizio cloud gestito a pagamento; self-hosted e managed cloud sullo stesso core  
-**Cliente iniziale:** team software da 2 a 30 persone  
-**Release 1:** da repository a PR pronta, più automazioni, web responsive/PWA, CLI e API  
+- **Stato:** piano target di prodotto e implementazione; non è una matrice delle capability correnti
+- **Data originale:** 22 agosto 2026
+- **Ultimo audit del ledger:** 24 agosto 2026
+- **Licenza corrente:** Apache-2.0
+- **Modello target:** core open source commercialmente utilizzabile; possibili offerte self-hosted e managed, topologia ancora aperta
+- **Cliente iniziale ipotizzato:** team software da 2 a 30 persone
+- **Release 1 proposta:** da repository a PR pronta, più automazioni, web responsive/PWA, CLI e API
 
 ---
 
@@ -59,30 +60,63 @@ Non riscriveremo kernel, VMM, database, identity provider, workflow engine, obje
 
 ---
 
-## 2. Decisioni già chiuse
+## 2. Ledger decisionale corrente
 
-| Area | Decisione | Conseguenza |
+Questo ledger corregge la precedente etichetta “decisioni già chiuse”. Le
+sezioni successive descrivono una **architettura target**: un componente citato
+nel piano non è per questo implementato, approvato dall’utente o selezionato.
+Lo stato eseguibile corrente vive in
+[`IMPLEMENTATION_BACKLOG.md`](IMPLEMENTATION_BACKLOG.md) e nell’evidenza di
+tranche più recente.
+
+### 2.1 Intento confermato dall’utente
+
+| Area | Decisione confermata | Confine |
 | --- | --- | --- |
-| Stack | Go + TypeScript | Go per control/data plane; TypeScript/Next.js per web; Rust solo dove profiling o privilegio lo giustifica |
-| Client | Web responsive/PWA, CLI e API; Expo in seguito | Contratti e design token condivisi, UI native non WebView |
-| Runtime macOS | VM reale via Virtualization.framework/vfkit | Stesso `SandboxDriver` del backend Firecracker Linux |
-| Runtime Linux | Firecracker/KVM | Produzione hosted su host Linux con hardening dedicato |
-| Isolamento | Snapshot/template tenant, microVM effimera per task writer | Cache veloce senza condivisione di macchina viva tra task |
-| Git | Worktree/branch isolati + Integrator | Nessun writer concorrente nello stesso checkout |
-| Deployment | Un comando locale; ruoli separabili; Kubernetes + scheduler nostro | La topologia scala senza fare di K8s il dominio del prodotto |
-| Tenancy | Tenant-scoped dal primo commit | ID, ownership, quota, policy, audit e query filter obbligatori |
-| Auth | OIDC completo subito | Keycloak/OIDC in locale e produzione; sessioni e service principals reali |
-| AuthZ | Policy configurabile e fine-grained | OpenFGA/OPA candidati; default deny ai trust boundary |
-| OSS/business | Tutto OSS + cloud gestito | Apache-2.0; il moat è operatività, UX, affidabilità ed ecosistema |
-| Dipendenze | Core permissivo | Apache/MIT/BSD/MPL in-process; copyleft solo come servizio separato sostituibile |
-| Provider AI | API, locali/OpenAI-compatible, OAuth solo se ufficiale | Niente token extraction o reverse engineering di login consumer |
-| RLM | Core nativo ma opzionale | Routing per task; depth/fan-out/token/tempo/costo sempre limitati |
-| Git remoto | Adapter completo, contract test fake durante sviluppo gratuito | Nessun push o consumo esterno implicito |
-| Retention | Codice/VM effimeri, audit durevole e configurabile | Debug possibile senza conservare indefinitamente checkout sensibili |
-| Billing | Stripe completo + metering/quote nativi | Ledger interno autorevole; Stripe è settlement, non source of truth dell’uso |
-| Integrazioni | GitHub, GitLab, Bitbucket, Slack, Linear, Jira, Vercel, MCP, webhook | Implementazione per ondate verticali, non adapter nominali |
-| Ready state | Gate configurabili; merge mai automatico di default | Spec, test, review, diff e budget devono avere evidenze |
-| Quality | Strict production gate | Format, lint, types, unit, integration, race, security, migration, E2E pertinenti |
+| Nome | Il prodotto si chiama **Ants**, richiamando agenti indipendenti che cooperano | Verifiche marchio, dominio e package restano attività pre-lancio |
+| OSS/business | Ants deve essere open source, commercialmente utilizzabile e vendibile | Forma dell’offerta managed, pricing e deployment non sono decisi |
+| Orizzonte | Il prodotto finito non deve restare local-only | Nella fase corrente si usano risorse locali, OSS, fake deterministici e servizi usa-e-getta senza costo |
+| Core prodotto | Planning profondo, ruolo Captain/Planner, Builder paralleli, isolamento, Review, integrazioni ed esecuzione durevole sono centrali | Capy è un riferimento di principi, non una specifica da copiare |
+| RLM | RLM e ricorsione controllata meritano ricerca e un ruolo preciso e misurabile | Spawn generico di subagent non è automaticamente RLM; limiti e valutazione sono obbligatori |
+| Strategia OSS | Riutilizzare componenti maturi dietro contratti Ants, mantenendo dominio, UX e policy propri | Nessun assemblaggio nominale di wrapper o dipendenza adottata senza prova |
+| Ricerca | Picode, Prime Agent, paper RLM e implementazioni primarie sono riferimenti da studiare | Claim prestazionali o commerciali restano claim upstream finché non riprodotti |
+| Mobile | Expo/React Native è una possibile direzione futura | Non è una scelta definitiva né una capability implementata |
+
+### 2.2 Fatti implementati e verificabili nel repository
+
+| Area | Fatto corrente | Limite |
+| --- | --- | --- |
+| Stack | Go per backend/CLI; TypeScript, Next.js e React per il web; licenza Apache-2.0 | Nessun client Expo e nessun componente Rust |
+| API/client | CLI, API `/v1` e console web responsive esistono; OpenAPI genera i contratti TypeScript | La superficie operatore è ancora parziale |
+| Persistenza/durabilità | Store memory e PostgreSQL, unit of work, outbox, claim, worker, retry, recovery, cancellation e retention sono implementati | Il motore corrente è Ants; Temporal non è in produzione |
+| Identità/tenancy | OIDC bearer, BFF PKCE/cookie sigillato e store tenant-scoped esistono; il bypass dev è rimosso | Membership, inviti, ruoli e authorization fine-grained non esistono |
+| Planning/review | Planner e Reviewer deterministici alimentano il vertical slice locale | Non sono agenti model-driven e non esiste un runtime RLM |
+| Sandbox/SCM | Driver process/fake e memory/local-Git sono implementati dietro porte | Il process sandbox non è un confine di sicurezza; niente VM reali o lifecycle SCM hosted |
+| Quality | Gate Go, contratti, web e suite Docker-backed sono definiti; CI hosted esegue anche PostgreSQL/Keycloak/browser | SBOM, secret scan, vulnerability scan, packaging e deploy gate sono assenti |
+
+### 2.3 Raccomandazioni correnti, non decisioni irreversibili
+
+| Area | Raccomandazione | Prova richiesta prima dell’adozione |
+| --- | --- | --- |
+| Confini | Conservare porte Ants per provider, workflow, sandbox, SCM, artifact e authorization | Contract/conformance test e blast-radius review |
+| Sviluppo | Continuare con vertical slice completi, fake locali canonici e nessun egress implicito | Test negativi, failure injection ed evidenza riproducibile |
+| Billing | Costruire prima un ledger locale idempotente di uso e budget | Reconciliation e duplicazione/replay provati prima di un provider di pagamento |
+| Integrazioni | Implementare un adapter alla volta contro fake HTTP e fixture registrate | Firma, replay, revoke, rate limit, permessi minimi e audit |
+| Isolamento | Definire una conformance suite unica per ogni `SandboxDriver` | Prove separate su macOS e su host Linux/KVM realmente idoneo |
+
+### 2.4 Decisioni aperte
+
+| Area | Alternative da valutare | Perché resta aperta |
+| --- | --- | --- |
+| Workflow durevole | Rafforzare il motore corrente, migrare dietro le porte, o usare Temporal per un sottoinsieme | Esiste già un motore con claim/outbox; aggiungerne un secondo ha costo di replay, migrazione e operazioni |
+| Authorization | Modello Ants/PostgreSQL, OpenFGA, OPA o combinazione | Mancano threat model, membership verticale e confronto operativo |
+| Sandbox | vfkit/Virtualization.framework, Firecracker/KVM, Kata/E2B o altri driver | Requisiti piattaforma e hardening non sono stati provati sui relativi host |
+| Deployment | Singolo host, servizi separati, Kubernetes o altra topologia | Scala, affidabilità, costi e operazioni non sono ancora misurati |
+| Provider AI | Locale, API compatibili o provider hosted | Non esiste ancora una porta/provider verticale né una policy costo/egress approvata |
+| Billing | Nessun provider, Stripe o alternativa | Metering e entitlement interni devono precedere settlement esterno |
+| Mobile | Nessun client nativo, Expo/React Native o altra soluzione | Il flusso web e i casi d’uso mobile non sono ancora stabilizzati |
+| Storage/telemetria | S3-compatible, OpenTelemetry e relativi backend | Retention, privacy, topologia ed esposizione non sono decise |
+| Integrazioni | Ordine e ampiezza di GitHub/GitLab/Bitbucket/Slack/Linear/Jira/Vercel/MCP | Servono dipendenze di prodotto e un primo adapter completo, non una lista nominale |
 
 ---
 

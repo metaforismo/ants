@@ -830,6 +830,7 @@ export interface operations {
                     "application/json": components["schemas"]["Thread"];
                 };
             };
+            400: components["responses"]["Problem"];
             401: components["responses"]["Problem"];
             404: components["responses"]["Problem"];
         };
@@ -869,6 +870,7 @@ export interface operations {
                     "application/json": components["schemas"]["MessagePage"];
                 };
             };
+            400: components["responses"]["Problem"];
             401: components["responses"]["Problem"];
             404: components["responses"]["Problem"];
         };
@@ -937,6 +939,7 @@ export interface operations {
                     "application/json": components["schemas"]["RunPage"];
                 };
             };
+            400: components["responses"]["Problem"];
             401: components["responses"]["Problem"];
             404: components["responses"]["Problem"];
         };
@@ -988,6 +991,7 @@ export interface operations {
                     "application/json": components["schemas"]["RunWithTasks"];
                 };
             };
+            400: components["responses"]["Problem"];
             401: components["responses"]["Problem"];
             404: components["responses"]["Problem"];
         };
@@ -1027,6 +1031,7 @@ export interface operations {
                     "application/json": components["schemas"]["EventPage"];
                 };
             };
+            400: components["responses"]["Problem"];
             401: components["responses"]["Problem"];
             404: components["responses"]["Problem"];
         };
@@ -1053,6 +1058,7 @@ export interface operations {
                     };
                 };
             };
+            400: components["responses"]["Problem"];
             401: components["responses"]["Problem"];
             404: components["responses"]["Problem"];
             409: components["responses"]["Problem"];
@@ -1078,6 +1084,7 @@ export interface operations {
                     "application/json": components["schemas"]["RunReport"];
                 };
             };
+            400: components["responses"]["Problem"];
             401: components["responses"]["Problem"];
             404: components["responses"]["Problem"];
             409: components["responses"]["Problem"];
@@ -1103,6 +1110,7 @@ export interface operations {
                     "application/json": components["schemas"]["Task"];
                 };
             };
+            400: components["responses"]["Problem"];
             401: components["responses"]["Problem"];
             404: components["responses"]["Problem"];
         };
@@ -1131,6 +1139,7 @@ export interface operations {
                     "text/plain": string;
                 };
             };
+            400: components["responses"]["Problem"];
             401: components["responses"]["Problem"];
             404: components["responses"]["Problem"];
         };
