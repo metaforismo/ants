@@ -56,7 +56,20 @@ proves the full path locally for free: service-principal client-credentials
 tokens drive tenant-scoped pipelines end to end, foreign tenants keep uniform
 404s, and wrong-audience or tampered tokens fail with typed problems.
 
-Read the [master plan](docs/MASTER_PLAN.md) for the complete product and implementation strategy. The condensed [resources index](docs/RESOURCES.md) links directly to the repositories, documentation, papers, and product research that accelerate development. Architecture decisions live in [docs/adr](docs/adr); the current implementation state and its proof matrix live in [docs/TRANCHE_3_6_EVIDENCE.md](docs/TRANCHE_3_6_EVIDENCE.md), with per-tranche records alongside (latest: [Tranche 3.6 OIDC resource-server foundation](docs/TRANCHE_3_6_EVIDENCE.md)).
+The first operable web surface ships in `apps/web` (ADR-0020): a Next.js
+console where signing in through the identity provider (Authorization Code +
+PKCE) opens the thread list and thread workspace against `/v1` — describe an
+outcome, start a run, watch its live event trail resume from sequence
+cursors, cancel, and read the terminal report. The browser never holds
+credentials: a server-side BFF attaches bearer tokens itself, the session
+lives in one AES-256-GCM-sealed `HttpOnly` cookie, silent renewal is
+serialized against refresh-token rotation, mutations carry `Idempotency-Key`,
+and correlation ids flow browser → BFF → API → events unchanged. Loading,
+empty, error, unauthorized, expired-session, rate-limited, and uniform
+not-available states are all designed (DESIGN.md); status is never color
+alone.
+
+Read the [master plan](docs/MASTER_PLAN.md) for the complete product and implementation strategy. The condensed [resources index](docs/RESOURCES.md) links directly to the repositories, documentation, papers, and product research that accelerate development. Architecture decisions live in [docs/adr](docs/adr); the current implementation state and its proof matrix live in [docs/TRANCHE_3_7_EVIDENCE.md](docs/TRANCHE_3_7_EVIDENCE.md), with per-tranche records alongside (latest: [Tranche 3.7 web console first operable surface](docs/TRANCHE_3_7_EVIDENCE.md)).
 
 ## Quick start
 
@@ -64,7 +77,9 @@ Read the [master plan](docs/MASTER_PLAN.md) for the complete product and impleme
 make build
 ./bin/ants demo run            # full pipeline: real commits + real test execution
 ./bin/ants demo run --scm memory --sandbox fake   # scripted variant (no subprocesses)
-make ci                        # complete quality gate
+make ci                        # complete hermetic quality gate (Go + web console)
+make ci-all                    # everything above plus Docker-backed suites
+scripts/test-web-e2e.sh        # browser E2E: real login → operate → observe (needs Docker)
 scripts/test-keycloak.sh       # OIDC integration suite against disposable Keycloak
 ```
 
@@ -79,6 +94,23 @@ Authenticated `/v1` routes need an OIDC bearer token: set `auth.oidc.*` in
 the configuration (or `ANTS_AUTH_OIDC_*` environment variables) to point at
 your identity provider; without it the server refuses every authenticated
 route with `authentication_not_configured`.
+
+Run the web console against it (all configuration is environment-based,
+validated fail-closed at first use):
+
+```sh
+cd apps/web
+ANTS_WEB_URL=http://127.0.0.1:3100 \
+ANTS_API_BASE_URL=http://127.0.0.1:8080 \
+ANTS_OIDC_ISSUER_URL=http://127.0.0.1:8081/realms/ants \
+ANTS_OIDC_CLIENT_ID=ants-web \
+ANTS_SESSION_KEY="$(openssl rand -base64 32)" \
+pnpm start
+```
+
+The console registers an `ants-web` public client with PKCE S256 and an
+`ants_tenant` user-attribute claim in the fixture realm; see ADR-0020 for the
+session posture and `apps/web/src/lib/config.ts` for the full variable list.
 
 The process also exposes Prometheus metrics at `/metrics` on the same
 listener (aggregate operational series with fixed-vocabulary labels; disable
@@ -115,6 +147,7 @@ The API is specified by [openapi/v1/openapi.yaml](openapi/v1/openapi.yaml); Type
 | `internal/sandbox`, `internal/scm` | Driver ports + tranche-1 drivers |
 | `internal/policy`, `internal/review` | Capability boundary and ready gate |
 | `internal/server` | `/v1` HTTP API |
+| `apps/web` | Next.js web console (BFF session posture, ADR-0020) |
 | `db/migrations` | PostgreSQL schema (embedded, forward-only) |
 | `packages/contracts` | Generated TypeScript API types |
 

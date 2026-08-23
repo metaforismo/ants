@@ -47,6 +47,19 @@ networks.
   acceptance grammar — and control characters or oversized values can never
   reach a log line, event envelope, or audit payload. Work outside a request
   carries no correlation at all rather than a fabricated identity.
+- The web console keeps credentials out of the browser entirely (ADR-0020):
+  access/refresh/ID tokens exist only inside an AES-256-GCM-sealed `HttpOnly`
+  cookie and server memory; no token has a code path into client JavaScript,
+  storage, or URLs (the session probe returns identity metadata only).
+  Mutating BFF routes require same-origin (`Origin` must match the validated
+  public origin or the request's own `Host`) on top of `SameSite=Lax`
+  cookies; post-login redirects accept relative in-app paths only; login
+  binds `state`, PKCE S256 verifier, and `nonce` in a single-use sealed
+  transaction cleared before exchange; refresh renewals are serialized so
+  rotation cannot race. The BFF is the only browser-to-API path, re-encodes
+  every path segment, and forwards API problems as typed documents — the
+  uniform not-available rendering for 403/404 preserves the API's
+  no-existence-oracle posture across tenants.
 - Audit events record every policy decision with actor, action, and outcome.
 
 ## Known limitations (accepted for the current tranches)
@@ -55,10 +68,20 @@ networks.
 - Tenant creation (`POST /v1/tenants`) is an open bootstrap endpoint until a
   membership/administration model ships; authentication protects all other
   /v1 routes, and tokens can only act inside the tenant their verified claim
-  names (ADR-0019 non-goals).
-- Authorization Code + PKCE login sessions, token refresh, revocation, and
-  device flow are deferred until the web/CLI clients that consume them exist
-  (ADR-0019).
+  names (ADR-0019 non-goals). The web console's first-login bootstrap uses
+  exactly this documented endpoint and nothing more (ADR-0020).
+- Back-channel/front-channel logout, OIDC Session Management, token binding
+  (DPoP), device flow for the CLI, and memberships/RBAC are deferred
+  (ADR-0019, ADR-0020). Logout today is local-first RP-initiated: the local
+  session always dies; the provider session ends via the metadata-derived
+  end-session endpoint on a best-effort redirect. The web console's absolute
+  8-hour session window bounds any stolen-cookie reuse independently of
+  provider policy.
+- The web console trusts the API's verification completely and adds no
+  authority of its own; but it runs in the same trust tier as whoever sets
+  `ANTS_SESSION_KEY` — that key seals every session cookie, so operators
+  must treat it like database credentials (rotate to invalidate all
+  sessions).
 - The outbox dispatcher is single-process; multi-node delivery scale-out is
   deferred (ADR-0011, ADR-0013).
 - Outbox retention/GC (ADR-0016) deletes only terminal `delivered`/`discarded`
