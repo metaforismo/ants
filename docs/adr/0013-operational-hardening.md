@@ -66,6 +66,9 @@ literal loopback IP or `localhost`. Wildcard and LAN binds fail startup with
 a typed message instead of exposing unauthenticated tenant switching to the
 network; disabling dev auth keeps every bind address legal. This implements
 the enforcement half of ADR-0004 without removing the development mode.
+Update (2026-08-23, ADR-0019): this gate is superseded — OIDC resource-server
+verification landed and the dev-header mode was deleted outright, removing
+both the mode and its loopback rule from the configuration surface.
 
 **HTTP listener bounds.** The listener gains `server.idle_timeout`
 (default 120s, env `ANTS_SERVER_IDLE_TIMEOUT`, validated positive) so idle

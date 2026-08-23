@@ -21,12 +21,22 @@ networks.
   references only.
 - Diagnostics redact secrets (`config.Secret` renders `[REDACTED]`
   everywhere).
+- Authentication is OIDC resource-server verification (ADR-0019): every
+  authenticated route requires a bearer JWT whose signature, issuer,
+  audience, validity window, algorithm (RS256 only), subject, and tenant
+  claim are verified server-side against keys fetched over discovery/JWKS;
+  tenant and subject are derived exclusively from verified claims, and the
+  tenant must resolve in the tenant store before any request proceeds. With
+  no provider configured, every authenticated route refuses with a typed
+  problem — there is no development bypass anywhere in the configuration
+  surface. The former dev-header mode was removed outright with ADR-0019.
 - Request logs are structurally redacted (ADR-0017): the logging middleware
   has no code path that can emit raw URLs, query strings, headers
   (including `Authorization` and `Cookie`), bodies, tenant/principal/resource
   identifiers, secrets, or client addresses. Inbound correlation ids are
   grammar-validated before echoing; rejected values are replaced, never
-  logged.
+  logged. Bearer tokens have no code path into error strings either
+  (asserted by tests).
 - Correlation propagation is injection-safe by construction (ADR-0018):
   external identifiers enter durable records only through grammar-validated
   edges — request header acceptance and operator `--trace-id` share one
@@ -38,9 +48,13 @@ networks.
 ## Known limitations (accepted for the current tranches)
 
 - Process-level sandbox is not isolation from a motivated attacker.
-- Dev header authentication is confined to loopback binds at startup
-  (ADR-0013) and must never be enabled outside local development; full OIDC
-  replaces it in a later horizon.
+- Tenant creation (`POST /v1/tenants`) is an open bootstrap endpoint until a
+  membership/administration model ships; authentication protects all other
+  /v1 routes, and tokens can only act inside the tenant their verified claim
+  names (ADR-0019 non-goals).
+- Authorization Code + PKCE login sessions, token refresh, revocation, and
+  device flow are deferred until the web/CLI clients that consume them exist
+  (ADR-0019).
 - The outbox dispatcher is single-process; multi-node delivery scale-out is
   deferred (ADR-0011, ADR-0013).
 - Outbox retention/GC (ADR-0016) deletes only terminal `delivered`/`discarded`

@@ -41,3 +41,6 @@ Horizon 1 scope; this tranche has no identity provider available.
   `dev_header_auth: true` on any non-loopback bind address, so the
   development posture cannot ship to a reachable interface even by mistake;
   full removal still lands with OIDC.
+  Update (2026-08-23, ADR-0019): full removal landed — the dev-header
+  authenticator, its configuration field, and its OpenAPI scheme are deleted,
+  replaced by the OIDC resource-server verifier at this same seam.
