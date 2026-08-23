@@ -99,3 +99,73 @@ jobs:
 
       - name: Test contracts package
         run: pnpm --filter @ants/contracts test
+
+  web:
+    name: Web console gates
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10.28.0
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+          cache-dependency-path: pnpm-lock.yaml
+
+      - name: Install
+        run: pnpm install --frozen-lockfile
+
+      - name: Typecheck
+        run: pnpm --filter @ants/web typecheck
+
+      - name: Lint
+        run: pnpm --filter @ants/web lint
+
+      - name: Unit and component tests
+        run: pnpm --filter @ants/web test
+
+      - name: Production build
+        run: pnpm --filter @ants/web build
+
+  web-e2e:
+    name: Browser E2E (disposable Keycloak + real API)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10.28.0
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+          cache-dependency-path: pnpm-lock.yaml
+
+      - name: Install workspace dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Install Playwright Chromium
+        working-directory: apps/web
+        run: pnpm exec playwright install --with-deps chromium
+
+      - name: Run browser E2E against the disposable stack
+        run: ./scripts/test-web-e2e.sh
+
+      - name: Upload failure artifacts
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: web-e2e-artifacts
+          path: apps/web/test-results/
+          if-no-files-found: ignore
