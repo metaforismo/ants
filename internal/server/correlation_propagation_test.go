@@ -131,11 +131,6 @@ func TestStartRunCarriesCorrelationIntoTransitionEvent(t *testing.T) {
 
 	slug := "corr-run-" + uniqueSuffix()
 	createTenantWithCorrelation(e, slug, "")
-	status, _, raw := e.do(http.MethodPost, "/v1/projects", devHeaders(slug, ""), fmt.Sprintf(
-		`{"slug":"calc-%s","name":"Calc","default_branch":"main","seed_name":"calculator-demo"}`, uniqueSuffix()))
-	if status != http.StatusCreated {
-		t.Fatalf("project: %d (%s)", status, truncate(raw))
-	}
 	_, threadID := e.seedProjectThread(slug)
 
 	runReqID := "run-start." + uniqueSuffix()

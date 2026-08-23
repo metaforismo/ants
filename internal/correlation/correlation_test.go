@@ -44,7 +44,8 @@ func TestContextRoundTrip(t *testing.T) {
 	}
 
 	// Derived contexts keep the carrier; sibling contexts stay isolated.
-	if derived, _ := correlation.From(context.WithValue(ctx, struct{}{}, "x")); derived != id {
+	type otherKey struct{}
+	if derived, _ := correlation.From(context.WithValue(ctx, otherKey{}, "x")); derived != id {
 		t.Errorf("derived context lost its carrier: %q", derived)
 	}
 	if _, ok := correlation.From(context.Background()); ok {
