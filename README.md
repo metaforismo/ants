@@ -25,7 +25,18 @@ class; never pending, leased, or dead rows, and never events or audit
 history — through `ants outbox retention preview/sweep` and, optionally, a
 scheduled loop (ADR-0016).
 
-Read the [master plan](docs/MASTER_PLAN.md) for the complete product and implementation strategy. The condensed [resources index](docs/RESOURCES.md) links directly to the repositories, documentation, papers, and product research that accelerate development. Architecture decisions live in [docs/adr](docs/adr); the current implementation state and its proof matrix live in [docs/TRANCHE_3_3_EVIDENCE.md](docs/TRANCHE_3_3_EVIDENCE.md), with per-tranche records alongside (latest: [Tranche 3.3 outbox retention/GC](docs/TRANCHE_3_3_EVIDENCE.md)).
+Observability is operational rather than aspirational: every served request
+logs one structured, redacted line — normalized route pattern, status,
+duration, correlation id (honored from `X-Request-ID` when well-formed,
+generated otherwise, always echoed), and a bounded remote class; raw paths,
+query strings, headers, bodies, identifiers, secrets, and client addresses
+have no code path into logs (ADR-0017). Alert-ready PromQL baselines over
+the closed metric set live in the runbooks, and at-least-once outbox
+delivery across a hard process kill is proven by an automated
+restart-convergence test against disposable PostgreSQL — redelivery without
+duplicated logical effects.
+
+Read the [master plan](docs/MASTER_PLAN.md) for the complete product and implementation strategy. The condensed [resources index](docs/RESOURCES.md) links directly to the repositories, documentation, papers, and product research that accelerate development. Architecture decisions live in [docs/adr](docs/adr); the current implementation state and its proof matrix live in [docs/TRANCHE_3_4_EVIDENCE.md](docs/TRANCHE_3_4_EVIDENCE.md), with per-tranche records alongside (latest: [Tranche 3.4 request logging + restart hardening](docs/TRANCHE_3_4_EVIDENCE.md)).
 
 ## Quick start
 
@@ -49,7 +60,11 @@ with `metrics.enabled: false`, see ADR-0014).
 
 Poisoned deliveries are operated through the CLI (see
 [docs/runbooks/outbox-operations.md](docs/runbooks/outbox-operations.md)),
-which also covers bounded retention sweeps over terminal rows.
+which also covers bounded retention sweeps over terminal rows. Alert-ready
+PromQL baselines over the exposed metric series — dead-letter growth,
+retry pressure, retention stall, 5xx rate, worker signals — are documented
+with their caveats in
+[docs/runbooks/alerting-baselines.md](docs/runbooks/alerting-baselines.md).
 
 The API is specified by [openapi/v1/openapi.yaml](openapi/v1/openapi.yaml); TypeScript types are generated into `packages/contracts`.
 

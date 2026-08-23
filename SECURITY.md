@@ -21,6 +21,12 @@ networks.
   references only.
 - Diagnostics redact secrets (`config.Secret` renders `[REDACTED]`
   everywhere).
+- Request logs are structurally redacted (ADR-0017): the logging middleware
+  has no code path that can emit raw URLs, query strings, headers
+  (including `Authorization` and `Cookie`), bodies, tenant/principal/resource
+  identifiers, secrets, or client addresses. Inbound correlation ids are
+  grammar-validated before echoing; rejected values are replaced, never
+  logged.
 - Audit events record every policy decision with actor, action, and outcome.
 
 ## Known limitations (accepted for the current tranches)
