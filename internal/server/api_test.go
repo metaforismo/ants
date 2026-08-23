@@ -440,3 +440,28 @@ func TestReadyzRecoversWhenDependencyReturns(t *testing.T) {
 		t.Fatalf("readiness must recover without restart, got %d", status)
 	}
 }
+
+// TestReadyzReportsTypedProviderFailure pins readiness truth for the OIDC
+// warm-up: when the injected check reports a typed IdP failure, /readyz names
+// auth_provider_unavailable instead of the generic persistence code.
+func TestReadyzReportsTypedProviderFailure(t *testing.T) {
+	e := newEnv(t)
+	e.setReady(func(context.Context) error {
+		return &domain.Error{
+			Kind:    domain.ErrKindTransient,
+			Code:    "auth_provider_unavailable",
+			Message: "identity provider metadata or keys are not reachable",
+		}
+	})
+
+	status, _, raw := e.do(http.MethodGet, "/readyz", nil, "")
+	if status != http.StatusServiceUnavailable {
+		t.Fatalf("failing IdP warm-up must fail readiness with 503, got %d", status)
+	}
+	var problem struct {
+		Code string `json:"code"`
+	}
+	if err := json.Unmarshal(raw, &problem); err != nil || problem.Code != "auth_provider_unavailable" {
+		t.Fatalf("readiness must name the failing dependency, got %s", raw)
+	}
+}

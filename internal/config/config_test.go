@@ -196,6 +196,12 @@ func TestValidationFailures(t *testing.T) {
 			c.Auth.OIDC = oidcDefaults("http://127.0.0.1:8081/r").Auth.OIDC
 			c.Auth.OIDC.TenantClaim = "tenant slug with spaces"
 		},
+		// Any single OIDC field set without issuer_url is a dormant typo and
+		// must fail startup (all-or-nothing, ADR-0019).
+		func(c *Config) { c.Auth.OIDC.TenantClaim = "org_tenant" },
+		func(c *Config) { c.Auth.OIDC.ClockSkew = Duration{17 * time.Second} },
+		func(c *Config) { c.Auth.OIDC.HTTPTimeout = Duration{9 * time.Second} },
+		func(c *Config) { c.Auth.OIDC.JWKSRefreshInterval = Duration{7 * time.Minute} },
 	}
 	for i, mutate := range cases {
 		cfg := Defaults()
@@ -242,13 +248,18 @@ func TestOIDCIssuerConfinedToLoopbackOverHTTP(t *testing.T) {
 	}
 }
 
-// TestOIDCPartialConfigurationRejected pins the all-or-nothing rule: an
-// audience without an issuer is a typo, not a configuration.
+// TestOIDCPartialConfigurationRejected pins the all-or-nothing rule: any
+// OIDC field set without an issuer is a typo, not a configuration.
 func TestOIDCPartialConfigurationRejected(t *testing.T) {
 	cfg := Defaults()
 	cfg.Auth.OIDC.Audience = "ants-api"
 	if err := cfg.Validate(); err == nil || !strings.Contains(err.Error(), "issuer_url") {
 		t.Fatalf("audience without issuer must fail loudly, got %v", err)
+	}
+	cfg = Defaults()
+	cfg.Auth.OIDC.ClockSkew = Duration{10 * time.Second}
+	if err := cfg.Validate(); err == nil || !strings.Contains(err.Error(), "partial configuration") {
+		t.Fatalf("clock_skew without issuer must fail loudly, got %v", err)
 	}
 }
 

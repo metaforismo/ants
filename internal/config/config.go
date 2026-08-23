@@ -411,13 +411,18 @@ func (c Config) Validate() error {
 			return fmt.Errorf("auth.oidc: %w", err)
 		}
 	} else {
+		// All-or-nothing: with issuer_url absent, ANY other deviation from
+		// the defaults is a typo that must fail startup instead of being
+		// silently ignored — a stray audience, claim name, or timeout would
+		// otherwise sit dormant until the day OIDC gets switched on.
 		o := c.Auth.OIDC
-		o.TenantClaim = ""
-		o.JWKSRefreshInterval = Duration{0}
-		o.ClockSkew = Duration{0}
-		o.HTTPTimeout = Duration{0}
-		if o.Audience != "" {
-			return fmt.Errorf("auth.oidc.audience set without auth.oidc.issuer_url; configure the full block or none of it")
+		def := Defaults().Auth.OIDC
+		if o.Audience != "" ||
+			o.TenantClaim != def.TenantClaim ||
+			o.JWKSRefreshInterval != def.JWKSRefreshInterval ||
+			o.ClockSkew != def.ClockSkew ||
+			o.HTTPTimeout != def.HTTPTimeout {
+			return fmt.Errorf("auth.oidc: partial configuration without auth.oidc.issuer_url; configure the full block or none of it")
 		}
 	}
 	switch c.Store.Mode {
@@ -492,7 +497,7 @@ func (o OIDC) Validate() error {
 	}
 	// Plaintext HTTP only for literal loopback IdPs (local Keycloak): the
 	// same rule the dev-auth gate used, applied to the issuer trust root.
-	if u.Scheme != "https" && !isLoopbackHost(u.Hostname()) {
+	if u.Scheme != "https" && !IsLoopbackHost(u.Hostname()) {
 		return fmt.Errorf("issuer_url %q must use https outside loopback", o.IssuerURL)
 	}
 	if strings.TrimSpace(o.Audience) == "" {
@@ -525,11 +530,12 @@ func (o OIDC) Validate() error {
 	return nil
 }
 
-// isLoopbackHost reports whether a literal host binds only this machine.
+// IsLoopbackHost reports whether a literal host binds only this machine.
 // Only literal loopback IPs and the reserved name "localhost" qualify; other
 // names would require DNS resolution inside validation, which must stay
-// deterministic and offline.
-func isLoopbackHost(host string) bool {
+// deterministic and offline. Exported because the authn transport rule
+// (issuer, jwks_uri, redirect targets) reuses the exact same definition.
+func IsLoopbackHost(host string) bool {
 	if host == "localhost" {
 		return true
 	}

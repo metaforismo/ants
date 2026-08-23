@@ -3,6 +3,7 @@ package server
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 
 	"github.com/metaforismo/ants/internal/domain"
@@ -73,17 +74,23 @@ func (s *Server) handleHealth(w http.ResponseWriter, _ *http.Request) {
 
 // handleReady answers 200 only while every injected dependency check passes.
 // A failing check is a transient problem: the process is alive but cannot
-// serve, so orchestrators should stop routing traffic to it.
+// serve, so orchestrators should stop routing traffic to it. Checks may
+// report their own typed problem (the OIDC warm-up names its provider code);
+// untyped errors fall back to the persistence classification.
 func (s *Server) handleReady(w http.ResponseWriter, r *http.Request) {
 	ctx, cancel := context.WithTimeout(r.Context(), s.cfg.Server.ReadinessTimeout.Duration)
 	defer cancel()
 	if err := s.ready(ctx); err != nil {
 		s.log.Error("readiness probe failed", "error", safeLogValue(err))
-		writeProblem(w, r, &domain.Error{
-			Kind:    domain.ErrKindTransient,
-			Code:    "store_unavailable",
-			Message: "persistence layer not reachable",
-		})
+		var derr *domain.Error
+		if !errors.As(err, &derr) {
+			derr = &domain.Error{
+				Kind:    domain.ErrKindTransient,
+				Code:    "store_unavailable",
+				Message: "persistence layer not reachable",
+			}
+		}
+		writeProblem(w, r, derr)
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]string{"status": "ready"})

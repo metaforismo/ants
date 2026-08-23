@@ -41,8 +41,9 @@ type idp struct {
 	mu          sync.Mutex
 	privKeys    map[string]*rsa.PrivateKey
 	jwksDoc     []byte
-	issuerValue string // what discovery reports; defaults to the server URL
-	jwksStatus  int    // forced failure mode for the JWKS endpoint
+	issuerValue string        // what discovery reports; defaults to the server URL
+	jwksStatus  int           // forced failure mode for the JWKS endpoint
+	release     chan struct{} // when set, JWKS responses block until it closes or the request dies
 	fetches     atomic.Int64
 }
 
@@ -58,14 +59,27 @@ func newIDP(t *testing.T, kids ...string) *idp {
 		w.Header().Set("Content-Type", "application/json")
 		fmt.Fprintf(w, `{"issuer":%q,"jwks_uri":%q}`, p.issuer(), p.server.URL+"/jwks.json")
 	})
-	mux.HandleFunc("/jwks.json", func(w http.ResponseWriter, _ *http.Request) {
+	mux.HandleFunc("/jwks.json", func(w http.ResponseWriter, r *http.Request) {
 		p.fetches.Add(1)
 		p.mu.Lock()
-		defer p.mu.Unlock()
-		if p.jwksStatus != 0 {
-			http.Error(w, "unavailable", p.jwksStatus)
+		release := p.release
+		status := p.jwksStatus
+		p.mu.Unlock()
+		if release != nil {
+			// Simulates a hung IdP: the fetch returns only when the caller's
+			// context gives up or the test releases it.
+			select {
+			case <-r.Context().Done():
+				return
+			case <-release:
+			}
+		}
+		if status != 0 {
+			http.Error(w, "unavailable", status)
 			return
 		}
+		p.mu.Lock()
+		defer p.mu.Unlock()
 		w.Header().Set("Content-Type", "application/json")
 		_, _ = w.Write(p.jwksDoc)
 	})
@@ -136,6 +150,15 @@ func (p *idp) setJWKSStatus(status int) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	p.jwksStatus = status
+}
+
+// setJWKSRelease turns the JWKS endpoint into a hung server: every response
+// waits until the channel closes or the requesting context dies. Closing the
+// channel in test cleanup keeps httptest.Server.Close deadlock-free.
+func (p *idp) setJWKSRelease(release chan struct{}) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.release = release
 }
 
 // mint builds a fully-claimed RS256 token signed under the given kid.

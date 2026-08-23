@@ -63,9 +63,14 @@ func NewBearer(opts Options) (*OIDCBearer, error) {
 	if clock == nil {
 		clock = time.Now
 	}
+	// The default client refuses redirect chains that leave the transport
+	// rule ADR-0019 pins for IdP traffic (https everywhere except literal
+	// loopback hosts): Go's stock client would otherwise follow even an
+	// https→http downgrade or an arbitrary-host hop. Injected test clients
+	// keep full control.
 	client := opts.Client
 	if client == nil {
-		client = http.DefaultClient
+		client = &http.Client{CheckRedirect: idpRedirectPolicy}
 	}
 	return &OIDCBearer{
 		cfg:     opts.Config,
@@ -148,12 +153,18 @@ func (a *OIDCBearer) Authenticate(r *http.Request) (*server.Principal, *domain.E
 		// Any verification failure may mean the IdP rotated keys since our
 		// last fetch; one rate-limited forced refresh followed by a single
 		// retry covers rotation while bounding attacker-induced fetches.
-		if refreshed, ferr := keys.refreshForced(r.Context(), a.now()); ferr == nil {
+		// The forced exchange is bounded by the same HTTP timeout as every
+		// other IdP call: without it a hung JWKS endpoint would stall the
+		// request until the server-level write deadline instead.
+		rctx, rcancel := context.WithTimeout(r.Context(), a.cfg.HTTPTimeout.Duration)
+		refreshed, ferr := keys.refreshForced(rctx, a.now())
+		if ferr == nil {
 			if tok2, perr2 := verifyToken(token, refreshed); perr2 == nil {
 				tok = tok2
 				perr = nil
 			}
 		}
+		rcancel()
 		if perr != nil {
 			return a.fail("invalid_token_signature")
 		}
@@ -261,6 +272,24 @@ func (a *OIDCBearer) Ready(ctx context.Context) error {
 
 // Issuer exposes the configured issuer for diagnostics.
 func (a *OIDCBearer) Issuer() string { return a.cfg.IssuerURL }
+
+// idpRedirectPolicy bounds redirect chains for IdP metadata traffic: at most
+// ten hops, and every target must satisfy the same transport rule as the
+// configured issuer — https anywhere, plaintext only for literal loopback
+// hosts. This keeps a hostile or mis-pointed provider from walking the fetch
+// onto a downgrade or an arbitrary internal endpoint.
+func idpRedirectPolicy(req *http.Request, via []*http.Request) error {
+	if len(via) >= 10 {
+		return fmt.Errorf("stopped after 10 redirects")
+	}
+	if req.URL.Scheme == "https" {
+		return nil
+	}
+	if req.URL.Scheme == "http" && config.IsLoopbackHost(req.URL.Hostname()) {
+		return nil
+	}
+	return fmt.Errorf("refusing redirect to %s: identity provider traffic must use https outside loopback", requestTarget(req.URL.String()))
+}
 
 // verifyToken checks the compact JWS signature against the key set without
 // running claim validators: claims are classified by principalFromClaims so

@@ -7,7 +7,10 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"strings"
+
+	"github.com/metaforismo/ants/internal/config"
 )
 
 // discoveryDoc is the subset of the OIDC discovery document the verifier
@@ -19,9 +22,13 @@ type discoveryDoc struct {
 }
 
 // discover fetches {issuer}/.well-known/openid-configuration and enforces the
-// two properties that make discovery safe: the document's issuer must match
-// the configured value byte-for-byte (OIDC Discovery section 4.3 — otherwise
-// a hostile host could re-point trust), and jwks_uri must be an absolute URL.
+// properties that make discovery safe: the document's issuer must match the
+// configured value byte-for-byte up to one optional trailing slash (OIDC
+// Discovery section 4.3 — otherwise a hostile host could re-point trust), and
+// jwks_uri must be an absolute URL obeying the same transport rule as the
+// issuer itself: https everywhere, plaintext only for literal loopback hosts.
+// Without that rule an https issuer's document could walk key fetching onto a
+// plaintext remote endpoint.
 func discover(ctx context.Context, client *http.Client, issuerURL string) (*discoveryDoc, error) {
 	wellKnown := strings.TrimSuffix(issuerURL, "/") + "/.well-known/openid-configuration"
 	var doc discoveryDoc
@@ -31,8 +38,12 @@ func discover(ctx context.Context, client *http.Client, issuerURL string) (*disc
 	if doc.Issuer != issuerURL && doc.Issuer != strings.TrimSuffix(issuerURL, "/") {
 		return nil, fmt.Errorf("discovery document issuer %q does not match configured issuer %q", doc.Issuer, issuerURL)
 	}
-	if !strings.HasPrefix(doc.JWKSURI, "https://") && !strings.HasPrefix(doc.JWKSURI, "http://") {
+	u, err := url.Parse(doc.JWKSURI)
+	if err != nil || u.Scheme == "" || u.Host == "" {
 		return nil, fmt.Errorf("discovery document has no usable jwks_uri")
+	}
+	if u.Scheme != "https" && !(u.Scheme == "http" && config.IsLoopbackHost(u.Hostname())) {
+		return nil, fmt.Errorf("jwks_uri %s must use https outside loopback", requestTarget(doc.JWKSURI))
 	}
 	return &doc, nil
 }

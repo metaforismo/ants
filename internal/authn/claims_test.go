@@ -232,19 +232,24 @@ func TestKeyRotation(t *testing.T) {
 
 	// The forced-refresh floor bounds attacker-induced IdP fetches: two
 	// unknown-kid attempts inside one floor window cause exactly one extra
-	// fetch beyond the initial cache fill.
+	// JWKS fetch. The revoked kid is what drives the forced path — a token
+	// under a cached key never refreshes at all.
 	before := f.idp.fetches.Load()
 	f.auth.keys.mu.Lock()
 	f.auth.keys.lastForcedAt = time.Time{} // re-arm the floor deterministically
 	f.auth.keys.mu.Unlock()
-	_, _ = f.authenticate(t, newToken)
+	if _, code := f.authenticate(t, oldToken); code != "invalid_token_signature" {
+		t.Fatalf("revoked kid must stay refused, got %q", code)
+	}
 	f.auth.keys.mu.Lock()
-	f.auth.keys.lastForcedAt = time.Now().Add(forcedRefreshFloor / 2) // inside floor
+	f.auth.keys.lastForcedAt = f.base.Add(forcedRefreshFloor / 2) // inside floor
 	f.auth.keys.mu.Unlock()
-	_, _ = f.authenticate(t, newToken)
+	if _, code := f.authenticate(t, oldToken); code != "invalid_token_signature" {
+		t.Fatalf("revoked kid must stay refused within the floor window, got %q", code)
+	}
 	after := f.idp.fetches.Load()
-	if after-before > 1 {
-		t.Fatalf("forced refreshes must be floored: %d fetches for 2 attempts", after-before)
+	if after-before != 1 {
+		t.Fatalf("forced refreshes must be floored: %d fetches for 2 unknown-kid attempts", after-before)
 	}
 }
 

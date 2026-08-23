@@ -9,6 +9,7 @@ import (
 
 	"github.com/metaforismo/ants/internal/app"
 	"github.com/metaforismo/ants/internal/authn"
+	"github.com/metaforismo/ants/internal/domain"
 	"github.com/metaforismo/ants/internal/server"
 	"github.com/metaforismo/ants/internal/store/migrate"
 )
@@ -36,7 +37,16 @@ func newServer(application *app.App) (*server.Server, error) {
 			if err := application.Ready(ctx); err != nil {
 				return err
 			}
-			return idpReady(ctx)
+			if err := idpReady(ctx); err != nil {
+				// Typed so /readyz reports the IdP as the failing dependency
+				// instead of the generic persistence classification.
+				return &domain.Error{
+					Kind:    domain.ErrKindTransient,
+					Code:    "auth_provider_unavailable",
+					Message: "identity provider metadata or keys are not reachable",
+				}
+			}
+			return nil
 		}
 	}
 	return server.New(server.Deps{
