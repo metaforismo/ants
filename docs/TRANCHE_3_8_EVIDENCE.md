@@ -1,0 +1,183 @@
+# Tranche 3 / PR 3.8 — Thread run history end to end: `GET /v1/threads/{id}/runs`, server-truth reattachment, run-detail parity — evidence record
+
+Date: 2026-08-23
+Branch: `feat/thread-run-history` → PR against `main`
+Base: `main` @ dd14690 ("verify: exact merge of the web-console PR"),
+verified clean, fetched, and byte-equal to `origin/main` before work began.
+Environment: macOS arm64 (sandboxed session), Go 1.25.5 toolchain with
+repo-local `GOPATH`/`GOCACHE`/`STATICCHECK_CACHE` under gitignored
+`.local/` (HOME never reassigned; staticcheck 2026.2.1 runs under the
+auto-fetched go1.26 toolchain inside that cache), pnpm 10, Node 22,
+Playwright 1.62.
+
+Scope: exactly one bounded outcome from MASTER_PLAN Horizon 1 items 3–4 per
+the PR 3.7 handoff — the durable execution seam exposed end to end in the
+web console: authoritative `GET /v1/threads/{id}/runs` (cursor pagination
+consistent with the existing list grammar), tenant-scoped list-runs-by-thread
+across ports/domain/memory/Postgres with deterministic ordering and full
+negative coverage, regenerated TypeScript contracts, BFF consumption so a
+reopened thread discovers and reattaches to its live/latest run without
+per-tab `sessionStorage` anchoring, run-detail parity (tasks/events/terminal
+report) on real `/v1` APIs and generated types, designed states per
+DESIGN.md, and an extended Playwright suite with a reopen-thread-reattaches
+scenario against disposable Keycloak + the real API binary.
+Deferred by name (handoff non-goals): memberships/RBAC, automations builder,
+billing surfaces, Expo mobile, distributed renewal. No speculative stubs were
+added for them.
+
+Skills note (honesty): the named workflow skills
+(`francesco-engineering-workflow:*`, impeccable, Emil) are not installed in
+this session's skill catalog, so none were invoked. Their intent was applied
+manually and is traceable in this record: boundary decision before code
+(ports-first ordering below), blast-radius reasoning before the read-path
+addition, deslop limited to the tranche diff (findings listed), evidence
+before claims (gate log paths + exit codes), and DESIGN.md-driven states for
+every new surface. Nothing in this record pretends a skill ran.
+
+## Requirement → code → test matrix
+
+| # | Requirement | Code | Tests |
+|---|---|---|---|
+| R1 | Authoritative OpenAPI list endpoint, pagination consistent with existing lists | `openapi/v1/openapi.yaml`: `get: operationId: listThreadRuns` under `/v1/threads/{id}/runs`; `RunPage {runs[], total}` schema; `after` integer cursor (≥0, default 0, strictly-greater) matching `AfterCursor` semantics; stable `(created_at asc, id asc)` order documented | `internal/server/openapi_test.go` `TestOpenAPIMatchesRoutes` pins spec ↔ route table bidirectionally |
+| R2 | Tenant-scoped store read with parity and deterministic order across adapters | `ports.RunStore.ListByThread` (explicit `domain.TenantID`, no optional tenancy); memory adapter (`internal/store/memory/runs.go`); PostgreSQL adapter (`internal/store/postgres/runs.go`) using the existing `runs_thread_idx` — zero schema change | shared contract rows `storetest.Run → RunListByThreadIsTenantScopedStableAndPaginated` execute identically against both adapters (memory locally PASS; PostgreSQL via hosted CI job, BLOCKED locally — see below): scoping, tie-break determinism, limit, cursor resume, beyond-max empty page, empty-thread non-nil page, uniform not-found for foreign and unknown threads |
+| R3 | Server wiring without existence leaks | route table entry + method-dispatch case (`internal/server/server.go`); `handleListThreadRuns` mirrors `handleListMessages`: principal → typed path parse → store call that distinguishes unknown/foreign thread (uniform 404 problem, ADR-0004) from known-empty thread (200 `{runs:[],total:0}`, array never JSON null) | `TestListThreadRuns` (order, total, `after=1` resume, beyond-max cursor, runless-thread empty array, missing-thread uniform 404 problem document, unauthenticated 401); `TestCrossTenantIsolation` extended with the `threadruns` row |
+| R4 | Contracts regenerated, not hand-edited | `make contracts-generate` (openapi-typescript 7.13.0) rewrote `packages/contracts/src/schema.d.ts`; only the hand-maintained export surface gained `RunPage` | `make contracts-drift` inside `make ci` exit 0 |
+| R5 | Console reattaches to live/latest run from server truth; no sessionStorage anchoring | `workspace-view.tsx` consumes `api.listThreadRuns` and renders `latestRun(runs)`; start action invalidates the runs query instead of writing an anchor; `src/hooks/use-active-run.ts` deleted outright | unit: `tests/runs.test.ts` (latest-selection, terminal classification); E2E `e2e/reopen.spec.ts` proves reattachment in a **second tab** — sessionStorage cannot cross tabs, so a visible panel there is proof of server-truth discovery |
+| R6 | Run-detail parity on real APIs + generated types, no duplicate polling or racey state | `run-panel.tsx` polls `getRunWithTasks` only while the run is non-terminal (`refetchInterval` callback); event trail keeps cursor resume gated on liveness; report fetches once at terminal; cancelled runs render a truthful no-report notice instead of probing an endpoint that answers 409 forever; all shapes come from `@ants/contracts` | existing operate journey (CI web-e2e job) plus reopened-tab parity assertions in `reopen.spec.ts` (event trail + evidence-table report after reattachment) |
+| R7 | Designed states per DESIGN.md; accessibility; reduced motion; responsive | loading skeleton card (`runs-loading`), empty state naming next action, typed error + Retry (`runs-error`), expired-session reuse of `ExpiredNotice`, running/cancellable StatusBadge+Cancel (shape-coded, label always), failed/completed report view, explicit cancelled banner (`run-cancelled`); status never color alone; no new motion primitives (reuses Field Station tokens; `prefers-reduced-motion` rules apply unchanged); flex/grid layouts wrap ≤800px as before | component/state conventions pinned by `tests/components.test.tsx`; browser dimensions by committed Playwright suite (hosted CI) |
+| R8 | Correlation/idempotency semantics untouched (ADR-0017/0018) | no middleware or engine changes; the new route rides the same request-log/correlation seam; start-run still requires `Idempotency-Key` with identical validation; BFF forwarding unchanged | existing correlation suites green in `make ci`; `TestRequestIdEchoed` unchanged and passing |
+| R9 | Docs updated only where truthful | ADR-0012 consequence update (read-only listing added; claims/machine untouched), ADR-0020 update (sessionStorage interim limitation closed by server truth), README console paragraph + latest-evidence pointer | manual cross-check against shipped behavior |
+
+## Gate results (commands, exit codes, exact counts)
+
+Exit codes captured into repo-local ignored logs under
+`.local/tranche-3_8/gates/`; never inferred from piped output.
+
+| Gate | Command | Exit | Counts |
+|---|---|---|---|
+| Full hermetic CI (recorded run) | `. .local/gate-env.sh && env -u GOTOOLCHAIN make ci > gates/make-ci.log` | **0** | fmt-check, vet, staticcheck, tidy-check, manifest-check clean; Go unit+race all packages ok; build ok; contracts test+drift ok; web typecheck/lint/build ok; web tests 63 passed / 9 files |
+| Fresh Go unit suite (post-deslop tree) | `go test -count=1 ./...` | **0** | 23 packages ok |
+| Focused race | `go test -race -count=1 ./internal/server/... ./internal/store/...` | **0** | server + store incl. memory/postgres/storetest |
+| New store-contract subtest (memory) | `go test -v -run TestMemoryStoreContract ./internal/store/storetest/` | 0 | 20/20 subtests PASS incl. `RunListByThreadIsTenantScopedStableAndPaginated` |
+| New API test | `go test -v -run TestListThreadRuns ./internal/server/` | 0 | PASS |
+| Web unit/component suite | `pnpm --filter @ants/web test` | 0 | 63 passed / 9 files (was 47/7 at main; +8 rows in `tests/runs.test.ts`, prior files unchanged in count terms) |
+| Web production build | `pnpm --filter @ants/web build` | 0 | — |
+| Lint/typecheck | eslint src e2e tests; tsc --noEmit | 0 | — |
+
+Exact test-count deltas attributable to this tranche:
+Go: +1 storetest contract subtest ×2 adapters (one executed locally, one via
+hosted CI Postgres), +1 server test function `TestListThreadRuns`,
++1 extended row in `TestCrossTenantIsolation`. Web: +8 vitest cases,
++2 Playwright specs' worth of coverage additions = one new spec file
+(`reopen.spec.ts`, single long scenario).
+
+## BLOCKED — Docker-backed suites locally (exact cause)
+
+One bounded read-only probe was executed exactly once this session:
+`docker version --format '{{.Server.Version}}'` under a 15 s shell timeout.
+It produced no daemon answer inside the bound (same degraded-daemon shape
+recorded by Tranche 3.7). Per session constraints there was no restart,
+prune, kill, retry, or further polling.
+
+Consequently **BLOCKED locally**, NOT RUN, no execution claimed:
+
+- `scripts/test-web-e2e.sh` / `make web-e2e` (browser E2E vs disposable
+  Keycloak + real API) — including the new `reopen.spec.ts`.
+- `scripts/test-postgres.sh` (migration integration; would have executed the
+  new storetest row against PostgreSQL).
+- `scripts/test-keycloak.sh`.
+
+Compensating proof: the repository's CI executes `web-e2e` (Playwright
+against disposable Keycloak + the production API binary) and the Postgres
+job (which drives `storetest.Run` through the real adapter) on healthy
+hosted runners; their verdicts on the PR head SHA are part of the hosted
+checks reported below. The scripts are committed unchanged in runnable form.
+
+## Defects found during this tranche (ledger)
+
+1. **Second sequential HTTP start impossible mid-flight (test design, not
+   product bug).** My first draft started two runs back-to-back over HTTP;
+   StartRun moves the thread to planning and a second start conflicts until
+   the thread settles, and after completion it sits in `ready_for_review`
+   which cannot transition to planning. Fixed by seeding additional runs
+   directly through the real store with explicit creation instants — honest
+   fixture seeding for a read-path test, immune to pipeline timing.
+2. **Dead branch copied from the messages pattern (deslop self-catch).** The
+   first PostgreSQL `ListByThread` guarded `sql.ErrNoRows` around a
+   `COUNT(*)` scan, which can never yield ErrNoRows. Removed; the known-
+   thread/unknown-thread distinction now happens only when the count is 0.
+3. **Unused boolean return (deslop self-catch).** `threadExists` returned
+   `(bool, error)` with the bool unread; simplified to `checkThreadVisible`
+   returning only the typed not-found-or-nil error.
+4. **Divergent malformed-ID expectation dropped.** I initially asserted 400
+   for `GET /v1/threads/not-a-thread/runs`; probing showed every existing
+   `{id}` route returns the same wrapped-internal problem for malformed ids
+   (`asDomainError` wraps plain parse errors as internal). Inventing a new
+   contract for one route would be inconsistent scope creep; assertion
+   removed, taxonomy fix named for a future tranche if wanted.
+5. **gofmt drift on first `make ci`.** Two test files needed formatting;
+   fixed and re-run to exit 0.
+
+## Deslop pass (tranche diff only)
+
+Beyond defects 2–4 above: verified no wrapper types with a single caller
+(`lib/runs.ts` holds two pure helpers each consumed by production code and
+tests), no unused parameters kept "for later", comments explain invariants
+(stability of ordinals, uniform-not-found posture) rather than narrate, and
+no cleanup expanded into pre-existing files outside the diff. Gates rerun
+after every change; final recorded `make ci` exit 0.
+
+## Residual risks (explicit)
+
+- Browser E2E (including the new second-tab reattachment scenario) has not
+  run on this machine — Docker degraded and the machine sandbox blocks
+  Chromium launch (recorded by Tranche 3.7); proof rests entirely on hosted
+  CI for the PR head SHA.
+- The `after` cursor is a position in the thread's stable creation order.
+  Runs are never deleted today, so positions are stable; if retention ever
+  learns to delete runs, this contract must be revisited explicitly rather
+  than silently.
+- The workspace attaches to the newest run only; older runs of a thread are
+  listed by the API (and paginated) but not yet navigable in the UI — a UI
+  history affordance remains future work and was deliberately not built here
+  (bounded outcome).
+- Cancelled-run reports remain structurally absent (API 409 by design); the
+  UI now says so instead of showing a generic failure. If product later wants
+  partial reports for cancellations, that is an orchestration change, not a
+  UI patch.
+- Malformed path ids answer wrapped-internal problems on all routes
+  (pre-existing); unchanged here.
+
+## Prompt for PR 3.9 (next tranche)
+
+"You are the sole coding agent for Ants Tranche 3 / PR 3.9. Work in the Ants
+repository; main must be clean at the squash merge of the run-history PR;
+verify status/fetch/exact HEAD first and read AGENTS.md,
+docs/MASTER_PLAN.md, docs/TRANCHE_3_8_EVIDENCE.md, and ADRs 0004, 0012,
+0019, 0020 before editing. Create a small branch; English throughout.
+
+Deliver exactly one bounded outcome from MASTER_PLAN Horizon 1 items 3–4
+(the remaining gap after run history): run-history navigation and
+observability polish in the console — render the thread's full run list from
+GET /v1/threads/{id}/runs with cursor pagination (older/newer pages),
+letting the operator open any past run's tasks/events/report while keeping
+the newest run auto-selected when live; plus the malformed-path-id error
+taxonomy fix (typed invalid_request 400 across /v1 handlers) if it stays
+small. Keep the OpenAPI spec authoritative and regenerate contracts; extend
+memory+Postgres parity tests and negative coverage proportionally; no
+hardcoded tenants/URLs; preserve correlation/idempotency semantics
+(ADR-0017/0018); states per DESIGN.md including reduced motion; extend
+scripts/test-web-e2e.sh coverage only where truthful.
+
+Do NOT implement memberships/RBAC, automations builder, billing surfaces,
+Expo mobile, or distributed renewal — name them deferred. Use skills as in
+prior tranches if installed (architect before boundaries, blast-radius
+first, deslop on the diff, show-me-your-work before milestones, handoff at
+end); otherwise apply their intent manually and say so honestly. Same gates
+and honesty rules as PR 3.8: hermetic make ci plus Docker-backed suites only
+if the daemon is demonstrably healthy (single bounded probe, else BLOCKED);
+record commands, exit codes, exact counts, PASS/FAIL/BLOCKED distinctions, a
+defect ledger, and residual risks in docs/TRANCHE_3_9_EVIDENCE.md; commit
+coherently, push, open one small PR linking evidence, wait for hosted
+checks, fix failures in focused commits, stop before merge, and report URL,
+head SHA, gates, limitations, residual risks, and a concrete PR 3.10 prompt."

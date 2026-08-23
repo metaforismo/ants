@@ -60,16 +60,19 @@ The first operable web surface ships in `apps/web` (ADR-0020): a Next.js
 console where signing in through the identity provider (Authorization Code +
 PKCE) opens the thread list and thread workspace against `/v1` — describe an
 outcome, start a run, watch its live event trail resume from sequence
-cursors, cancel, and read the terminal report. The browser never holds
-credentials: a server-side BFF attaches bearer tokens itself, the session
-lives in one AES-256-GCM-sealed `HttpOnly` cookie, silent renewal is
-serialized against refresh-token rotation, mutations carry `Idempotency-Key`,
-and correlation ids flow browser → BFF → API → events unchanged. Loading,
-empty, error, unauthorized, expired-session, rate-limited, and uniform
-not-available states are all designed (DESIGN.md); status is never color
-alone.
+cursors, cancel, and read the terminal report. Reopening a thread anywhere
+reattaches to its live/latest run: the console discovers runs through
+`GET /v1/threads/{id}/runs` (stable oldest-first history with cursor
+pagination), so the panel follows the thread rather than the browser tab.
+The browser never holds credentials: a server-side BFF attaches bearer tokens
+itself, the session lives in one AES-256-GCM-sealed `HttpOnly` cookie,
+silent renewal is serialized against refresh-token rotation, mutations carry
+`Idempotency-Key`, and correlation ids flow browser → BFF → API → events
+unchanged. Loading, empty, error, unauthorized, expired-session,
+rate-limited, and uniform not-available states are all designed (DESIGN.md);
+status is never color alone.
 
-Read the [master plan](docs/MASTER_PLAN.md) for the complete product and implementation strategy. The condensed [resources index](docs/RESOURCES.md) links directly to the repositories, documentation, papers, and product research that accelerate development. Architecture decisions live in [docs/adr](docs/adr); the current implementation state and its proof matrix live in [docs/TRANCHE_3_7_EVIDENCE.md](docs/TRANCHE_3_7_EVIDENCE.md), with per-tranche records alongside (latest: [Tranche 3.7 web console first operable surface](docs/TRANCHE_3_7_EVIDENCE.md)).
+Read the [master plan](docs/MASTER_PLAN.md) for the complete product and implementation strategy. The condensed [resources index](docs/RESOURCES.md) links directly to the repositories, documentation, papers, and product research that accelerate development. Architecture decisions live in [docs/adr](docs/adr); the current implementation state and its proof matrix live in [docs/TRANCHE_3_8_EVIDENCE.md](docs/TRANCHE_3_8_EVIDENCE.md), with per-tranche records alongside (latest: [Tranche 3.8 thread run history end to end](docs/TRANCHE_3_8_EVIDENCE.md)).
 
 ## Quick start
 

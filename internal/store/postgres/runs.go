@@ -184,18 +184,15 @@ func (r *RunRepository) ListByThread(ctx context.Context, tenantID domain.Tenant
 	err := r.st.q(ctx).QueryRowContext(ctx,
 		`SELECT COUNT(*) FROM runs WHERE tenant_id = $1 AND thread_id = $2`,
 		string(tenantID), string(threadID)).Scan(&total)
-	if errors.Is(err, sql.ErrNoRows) || (err == nil && total == 0) {
-		// Distinguish unknown or foreign thread from a known-but-empty one.
-		if _, terr := r.threadExists(ctx, tenantID, threadID); terr != nil {
-			return nil, 0, terr
-		}
-		if err != nil {
-			return nil, 0, wrapScan(err)
-		}
-		return []*domain.Run{}, 0, nil
-	}
 	if err != nil {
 		return nil, 0, wrapScan(err)
+	}
+	if total == 0 {
+		// Distinguish unknown or foreign thread from a known-but-empty one.
+		if terr := r.checkThreadVisible(ctx, tenantID, threadID); terr != nil {
+			return nil, 0, terr
+		}
+		return []*domain.Run{}, 0, nil
 	}
 	query := `SELECT ` + runColumns + ` FROM runs
 	          WHERE tenant_id = $1 AND thread_id = $2
@@ -221,21 +218,21 @@ func (r *RunRepository) ListByThread(ctx context.Context, tenantID domain.Tenant
 	return out, total, rows.Err()
 }
 
-// threadExists resolves the uniform not-found for a list against an unknown
-// or foreign-tenant thread; known threads answer with their (possibly empty)
-// page.
-func (r *RunRepository) threadExists(ctx context.Context, tenantID domain.TenantID, threadID domain.ThreadID) (bool, error) {
+// checkThreadVisible resolves the uniform not-found for a list against an
+// unknown or foreign-tenant thread; known threads answer with their
+// (possibly empty) page.
+func (r *RunRepository) checkThreadVisible(ctx context.Context, tenantID domain.TenantID, threadID domain.ThreadID) error {
 	var ok bool
 	err := r.st.q(ctx).QueryRowContext(ctx,
 		`SELECT EXISTS (SELECT 1 FROM threads WHERE id = $1 AND tenant_id = $2)`,
 		string(threadID), string(tenantID)).Scan(&ok)
 	if err != nil {
-		return false, wrapScan(err)
+		return wrapScan(err)
 	}
 	if !ok {
-		return false, domain.NotFoundf("thread", threadID)
+		return domain.NotFoundf("thread", threadID)
 	}
-	return true, nil
+	return nil
 }
 
 func nonNilTaskIDs(in []domain.TaskID) []domain.TaskID {

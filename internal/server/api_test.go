@@ -364,7 +364,7 @@ func (e *env) seedRunAt(t *testing.T, tenantSlug, threadID string, at time.Time)
 // runPage mirrors the GET /v1/threads/{id}/runs envelope. Runs is a pointer
 // so the empty case can pin "array, never JSON null".
 type runPage struct {
-	Runs  *[]struct {
+	Runs *[]struct {
 		ID     string `json:"id"`
 		Status string `json:"status"`
 	} `json:"runs"`

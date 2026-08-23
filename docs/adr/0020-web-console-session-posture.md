@@ -139,6 +139,14 @@ open `POST /v1/tenants` endpoint (probing `unknown_tenant` first;
 concurrent-create races treated as success). This is a named limitation of
 the current membership model, not a property of the session design.
 
+Update (2026-08-23, PR 3.8): the console's run anchoring moved fully onto
+server truth. The workspace consumes `GET /v1/threads/{id}/runs` through the
+BFF and reattaches to the thread's live/latest run in any tab, replacing the
+original per-tab `sessionStorage` anchor that PR 3.7 shipped as an interim
+limitation. Nothing about the session posture changes: the new read is one
+more bearer-token call through the same proxy, and cross-tenant misses still
+render as uniform not-available copy (ADR-0004).
+
 ## Non-goals
 
 - Memberships, roles, invitations, RBAC — the authorization model remains

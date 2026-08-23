@@ -157,3 +157,10 @@ environment-overridable via `ANTS_WORKER_*`.
 - One latent bug surfaced by the new shared suite was fixed:
   `RunRepository.Update` on PostgreSQL nulled the NOT NULL `principal`
   column for principals saved as empty string.
+
+Update (2026-08-23, PR 3.8): the durable run record gained a read-only,
+tenant-scoped listing per thread (`RunStore.ListByThread`, served at
+`GET /v1/threads/{id}/runs` in stable `(created_at, id asc)` order). This
+touches neither the claims machinery nor the run state machine — terminality
+still lives in the closed status table above, and the web console now uses
+the listing to discover a thread's live/latest run (ADR-0020).
