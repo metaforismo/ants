@@ -244,32 +244,13 @@ func (s *Server) routes(mux *http.ServeMux) {
 				panic(fmt.Sprintf("route %s %s has no handler mapping", route.Method, route.Path))
 			}
 		}
-		mux.Handle(route.Method+" "+route.Path, s.wrap(handler, route.Auth, route.Path))
+		mux.Handle(route.Method+" "+route.Path, s.withRequestLog(route.Path, route.Auth, handler))
 	}
 	// Catch-all: unknown paths get RFC 9457 problems instead of net/http's
 	// plain-text default.
-	mux.Handle("/", s.wrap(func(w http.ResponseWriter, r *http.Request) {
+	mux.Handle("/", s.withRequestLog(metrics.RouteUnmatched, false, func(w http.ResponseWriter, r *http.Request) {
 		writeProblem(w, r, domain.NotFoundf("route", r.URL.Path))
-	}, false, metrics.RouteUnmatched))
-}
-
-// wrap applies the middleware chain; authenticated routes resolve their
-// principal before any handler code runs. The route label feeds request
-// metrics with the pinned pattern, never the raw path (ADR-0014). Panic
-// recovery sits inside the request log so a recovered 500 is still observed
-// and logged with its real status.
-func (s *Server) wrap(next http.HandlerFunc, requiresAuth bool, route string) http.Handler {
-	return s.withRequestLog(route, s.recoverPanics(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if requiresAuth {
-			principal, derr := s.auth.Authenticate(r)
-			if derr != nil {
-				writeProblem(w, r, derr)
-				return
-			}
-			r = r.WithContext(context.WithValue(r.Context(), principalKey{}, principal))
-		}
-		next(w, r)
-	})))
+	}))
 }
 
 type principalKey struct{}

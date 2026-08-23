@@ -144,9 +144,13 @@ gone permanently — there is no undo — but the corresponding events remain in
 
 ## Alerting notes
 
-Baseline candidates over series from ADR-0014/0015:
-`rate(ants_outbox_messages_dead_lettered_total[...]) > 0 sustained`,
-`ants_outbox_messages{state="dead"} growth`, and
-`ants_outbox_operator_actions_total{outcome!="succeeded"}` spikes
-(stale_credential bursts usually mean two operators or two automations are
-working the same queue).
+Alert-ready baselines and PromQL over these series — including dead-letter
+growth, retry pressure with well-formed denominators, and retention
+stall detection — live in [alerting-baselines.md](alerting-baselines.md).
+Quick references:
+
+- `rate(ants_outbox_messages_dead_lettered_total[5m]) > 0` sustained, or
+  `ants_outbox_messages{state="dead"}` growth;
+- `ants_outbox_operator_actions_total{outcome!="succeeded"}` spikes
+  (stale_credential bursts usually mean two operators or two automations are
+  working the same queue) — triage signal, not a page.
