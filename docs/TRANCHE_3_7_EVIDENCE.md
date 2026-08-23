@@ -53,7 +53,7 @@ Exit codes captured into repo-local ignored logs under
 | pnpm install (lockfile honest) | `pnpm install --frozen-lockfile --offline` | 0 ("Already up to date") |
 | Web typecheck | `pnpm --filter @ants/web typecheck` | 0 |
 | Web lint | `pnpm --filter @ants/web lint` | 0 |
-| Web unit/component tests | `pnpm --filter @ants/web test` | 0 (52 tests / 7 files, incl. renewal-decision matrix) |
+| Web unit/component tests | `pnpm --filter @ants/web test` | 0 (47 tests / 7 files at this record's final tree, incl. renewal-decision matrix; an interim pre-deslop reading of 52 across 8 files was misrecorded here as "52 / 7" until the audit correction below) |
 | Web production build | `pnpm --filter @ants/web build` | 0 |
 | Full hermetic CI (pre-deslop) | `make ci` (fmt, vet, staticcheck, tidy-check, manifest-check, unit, race, build, contracts-test, contracts-drift, web-typecheck/lint/test/build) | 0 |
 | Manifest check (after npm entries) | `go run ./scripts/manifestcheck` | 0 |
@@ -236,6 +236,50 @@ session's external font download was correctly reverted — see audit log).
 - Renewal serialization is process-wide; pathological mass expiry adds
   bounded latency (correctness preserved by lock re-read plus cache), but
   renewal metrics would be a welcome later addition.
+
+## Independent adversarial audit (post-head 38e677c, same branch)
+
+An independent auditor session re-verified the tranche at head `38e677c`
+(clean tree, PR #21 OPEN, all four hosted checks green on that exact SHA)
+and landed two fixes plus this correction as focused audit commits:
+
+1. **BFF `/v1` containment made structural** (`apps/web/src/lib/proxy-path.ts`,
+   wired into the catch-all route). Live probing against the built console
+   and a real API binary proved the pre-audit invariant held only
+   *incidentally*: Next 16.3.2 normalizes decoded `%2e%2e` segments before
+   handlers run, and Go's mux happens not to treat `%2F` inside one segment
+   as a separator — while the route's own re-encoding does not neutralize
+   dot segments (`encodeURIComponent("..") === ".."`), and `%2e%2e%2fhealthz`
+   arrives as the single decoded segment `"../healthz"`, which passed the
+   first-pass fix's exact-match check and still depended on the Go-side
+   behavior. The shipped fix refuses dot segments, decoded separators, empty
+   and oversized segments outright; every remaining forwarded byte is
+   re-encoded by `encodeURIComponent` (which percent-encodes `%`, `?`, `#`),
+   so no crafted path can cross the `/v1/*` boundary even if either framework
+   changes behavior. Regression rows: normal proxying unchanged; all
+   smuggling forms now answered by the BFF's own uniform 404 problem before
+   upstream; CSRF negatives (foreign Origin, missing Origin) still 403.
+2. **`ThreadStore.ListByTenant` tie order pinned across stores**: memory
+   tie-broke equal `updated_at` by ascending id while Postgres left ties to
+   the planner — rows could shuffle between the web list's 5-second polls.
+   Postgres now orders `updated_at DESC, id ASC` and the shared store
+   contract seeds an exact tie, asserting one deterministic order for both
+   implementations (Postgres row exercised by the hosted CI Postgres job;
+   locally BLOCKED with the Docker constraint above).
+3. **Evidence correction**: the web unit gate count in the table above is
+   47 tests / 7 files at this record's final tree (fresh vitest run); the
+   earlier "52 / 7" mixed a pre-deslop test total with the post-deslop file
+   count.
+
+Audit gates rerun on the final audited tree: `go test -count=1 ./...` exit 0,
+`go test -race -count=1 ./internal/server/... ./internal/store/... ./internal/cli/...`
+exit 0, `make ci` exit 0 (fmt/vet/staticcheck/tidy/manifest/unit/race/build/
+contracts/web-typecheck/lint/test/build), fresh web suite 51 tests / 8 files
+including the new proxy-path rows. Docker-backed suites remain BLOCKED for
+the reasons recorded above; the loopback probe fixtures the auditor started
+(ports 3199/3201/3203 web, 18099/18101 API) could not be signaled because
+this machine's sandbox denies `kill`/`ps`; they are bound to 127.0.0.1 only
+and die with their session.
 
 ## Prompt for PR 3.8 (next tranche)
 
