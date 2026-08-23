@@ -25,9 +25,14 @@ const (
 	PrefixPrincipal      = "prn"
 	PrefixSandbox        = "sbx"
 	PrefixEvent          = "evt"
-	idSeparator          = "_"
-	minIDRandomChars     = 20
-	maxIDSuffixLen       = 64
+	// PrefixRequest names HTTP request correlation identifiers (ADR-0017):
+	// the request-log counterpart of the trace_id slot events carry, sharing
+	// the same prefixed shape so identifiers are recognizable across logs,
+	// events, and operator tooling.
+	PrefixRequest    = "req"
+	idSeparator      = "_"
+	minIDRandomChars = 20
+	maxIDSuffixLen   = 64
 )
 
 // Typed identifiers. Each wraps a validated "<prefix>_<suffix>" string so
