@@ -15,11 +15,13 @@ info:
     - Tenant scoping is implicit and mandatory: every authenticated
       request operates inside exactly one tenant.
 
-    Authentication: production deployments authenticate via OIDC at the
-    edge (Horizon 1 work). This tranche additionally defines the explicit
-    development-only header pair `X-Ants-Dev-Tenant` /
-    `X-Ants-Dev-Principal`; servers refuse every request with problem code
-    `authentication_not_configured` unless dev auth is enabled on purpose.
+    Authentication: servers act as OIDC resource servers (ADR-0019).
+    Authenticated routes require `Authorization: Bearer <access token>` — a
+    JWT issued by the configured identity provider, verified for signature,
+    issuer, audience, and validity window; the tenant and subject are derived
+    exclusively from verified claims. Without a configured provider every
+    authenticated route refuses with problem code
+    `authentication_not_configured`. There is no development bypass.
 servers:
   - url: http://127.0.0.1:8080
     description: Local development default
@@ -111,7 +113,7 @@ paths:
       tags: [projects]
       summary: List projects of the authenticated tenant
       operationId: listProjects
-      security: [{ devHeader: [] }]
+      security: [{ bearerAuth: [] }]
       responses:
         "200":
           description: Projects (possibly empty)
@@ -125,7 +127,7 @@ paths:
       tags: [projects]
       summary: Create a project
       operationId: createProject
-      security: [{ devHeader: [] }]
+      security: [{ bearerAuth: [] }]
       requestBody:
         required: true
         content:
@@ -149,7 +151,7 @@ paths:
       tags: [threads]
       summary: Open a thread on a project
       operationId: createThread
-      security: [{ devHeader: [] }]
+      security: [{ bearerAuth: [] }]
       requestBody:
         required: true
         content:
@@ -175,7 +177,7 @@ paths:
       tags: [threads]
       summary: Fetch one thread
       operationId: getThread
-      security: [{ devHeader: [] }]
+      security: [{ bearerAuth: [] }]
       parameters:
         - $ref: "#/components/parameters/ThreadID"
       responses:
@@ -195,7 +197,7 @@ paths:
       tags: [threads]
       summary: Append a user message (the run request)
       operationId: appendThreadMessage
-      security: [{ devHeader: [] }]
+      security: [{ bearerAuth: [] }]
       parameters:
         - $ref: "#/components/parameters/ThreadID"
       requestBody:
@@ -221,7 +223,7 @@ paths:
       tags: [threads]
       summary: List messages after a cursor
       operationId: listThreadMessages
-      security: [{ devHeader: [] }]
+      security: [{ bearerAuth: [] }]
       parameters:
         - $ref: "#/components/parameters/ThreadID"
         - $ref: "#/components/parameters/AfterCursor"
@@ -244,7 +246,7 @@ paths:
         Start a run for the thread. Requires an `Idempotency-Key`;
         retrying the same call replays the same run instead of creating one.
       operationId: startRun
-      security: [{ devHeader: [] }]
+      security: [{ bearerAuth: [] }]
       parameters:
         - $ref: "#/components/parameters/ThreadID"
         - name: Idempotency-Key
@@ -272,7 +274,7 @@ paths:
       tags: [runs]
       summary: Fetch a run with its tasks
       operationId: getRun
-      security: [{ devHeader: [] }]
+      security: [{ bearerAuth: [] }]
       parameters:
         - $ref: "#/components/parameters/RunID"
       responses:
@@ -292,7 +294,7 @@ paths:
       tags: [runs]
       summary: Event stream page for the run
       operationId: listRunEvents
-      security: [{ devHeader: [] }]
+      security: [{ bearerAuth: [] }]
       parameters:
         - $ref: "#/components/parameters/RunID"
         - $ref: "#/components/parameters/AfterCursor"
@@ -313,7 +315,7 @@ paths:
       tags: [runs]
       summary: Request cooperative cancellation of an executing run
       operationId: cancelRun
-      security: [{ devHeader: [] }]
+      security: [{ bearerAuth: [] }]
       parameters:
         - $ref: "#/components/parameters/RunID"
       responses:
@@ -339,7 +341,7 @@ paths:
       tags: [runs]
       summary: Evidence-based run report (available once the run is terminal)
       operationId: getRunReport
-      security: [{ devHeader: [] }]
+      security: [{ bearerAuth: [] }]
       parameters:
         - $ref: "#/components/parameters/RunID"
       responses:
@@ -361,7 +363,7 @@ paths:
       tags: [tasks]
       summary: Fetch one task
       operationId: getTask
-      security: [{ devHeader: [] }]
+      security: [{ bearerAuth: [] }]
       parameters:
         - $ref: "#/components/parameters/TaskID"
       responses:
@@ -384,7 +386,7 @@ paths:
         Returns raw bytes. `X-Ants-Digest` carries the SHA-256 content digest;
         `X-Ants-Retention` the retention class.
       operationId: getArtifact
-      security: [{ devHeader: [] }]
+      security: [{ bearerAuth: [] }]
       parameters:
         - $ref: "#/components/parameters/ArtifactID"
       responses:
@@ -409,11 +411,21 @@ paths:
 
 components:
   securitySchemes:
-    devHeader:
-      type: apiKey
-      in: header
-      name: X-Ants-Dev-Tenant
-      description: Development only. Paired with X-Ants-Dev-Principal.
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+      description: |
+        OIDC access token issued by the deployment's identity provider
+        (Keycloak locally). Tokens must be signed with RS256, carry the API's
+        audience, name the Ants tenant in the configured claim (default
+        `ants_tenant`), and stay within their validity window. Rejections use
+        stable problem codes: missing_bearer_token,
+        invalid_authorization_header, unsupported_token_algorithm,
+        malformed_token, invalid_token_signature, untrusted_issuer,
+        audience_mismatch, token_expired, token_not_yet_valid,
+        missing_subject, missing_exp, invalid_tenant_claim, unknown_tenant;
+        identity-provider outages surface as transient problems instead.
 
   parameters:
     ThreadID:

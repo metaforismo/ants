@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net"
+	"net/url"
 	"os"
 	"strconv"
 	"strings"
@@ -83,7 +84,6 @@ const (
 
 type Server struct {
 	HTTPAddr        string   `yaml:"http_addr"`
-	DevHeaderAuth   bool     `yaml:"dev_header_auth"`
 	ReadTimeout     Duration `yaml:"read_timeout"`
 	WriteTimeout    Duration `yaml:"write_timeout"`
 	IdleTimeout     Duration `yaml:"idle_timeout"`
@@ -91,6 +91,31 @@ type Server struct {
 	// ReadinessTimeout bounds each readiness probe's dependency checks so a
 	// slow database turns into a fast 503 instead of a hung health check.
 	ReadinessTimeout Duration `yaml:"readiness_timeout"`
+}
+
+// DefaultTenantClaim names the verified JWT claim carrying the Ants tenant
+// slug (ADR-0019). It lives beside the config because both the YAML default
+// and validation reference it.
+const DefaultTenantClaim = "ants_tenant"
+
+// OIDC configures the resource-server half of OIDC (ADR-0019): where to find
+// the identity provider, which tokens to accept, and which verified claim
+// names the tenant. There are deliberately no client secrets here — the API
+// only consumes public keys and never holds IdP credentials.
+type OIDC struct {
+	IssuerURL           string   `yaml:"issuer_url"`
+	Audience            string   `yaml:"audience"`
+	TenantClaim         string   `yaml:"tenant_claim"`
+	JWKSRefreshInterval Duration `yaml:"jwks_refresh_interval"`
+	ClockSkew           Duration `yaml:"clock_skew"`
+	HTTPTimeout         Duration `yaml:"http_timeout"`
+}
+
+// Configured reports whether any OIDC field was set. Partial configuration is
+// rejected by Validate, so this single predicate decides the authentication
+// mode at the composition root.
+func (o OIDC) Configured() bool {
+	return o.IssuerURL != ""
 }
 
 // PostgresPool bounds the connection pool. Defaults are sized for a
@@ -265,6 +290,7 @@ type Metrics struct {
 
 type Config struct {
 	Server       Server       `yaml:"server"`
+	Auth         Auth         `yaml:"auth"`
 	Store        Store        `yaml:"store"`
 	Orchestrator Orchestrator `yaml:"orchestrator"`
 	Sandbox      Sandbox      `yaml:"sandbox"`
@@ -276,19 +302,33 @@ type Config struct {
 	Log          Log          `yaml:"log"`
 }
 
+// Auth selects the authentication mode. With OIDC unconfigured the API
+// refuses every authenticated request (ADR-0004); there is no implicit
+// fallback and no development bypass anywhere in the configuration surface.
+type Auth struct {
+	OIDC OIDC `yaml:"oidc"`
+}
+
 // Defaults are safe: local-only bind address, memory store, deny-by-default
-// posture for anything crossing a trust boundary. Dev auth is off by default;
-// enabling it is an explicit operator decision.
+// posture for anything crossing a trust boundary. OIDC is off until an
+// operator names an issuer.
 func Defaults() Config {
 	return Config{
 		Server: Server{
 			HTTPAddr:         "127.0.0.1:8080",
-			DevHeaderAuth:    false,
 			ReadTimeout:      Duration{10 * time.Second},
 			WriteTimeout:     Duration{30 * time.Second},
 			IdleTimeout:      Duration{120 * time.Second},
 			ShutdownTimeout:  Duration{10 * time.Second},
 			ReadinessTimeout: Duration{2 * time.Second},
+		},
+		Auth: Auth{
+			OIDC: OIDC{
+				TenantClaim:         DefaultTenantClaim,
+				JWKSRefreshInterval: Duration{15 * time.Minute},
+				ClockSkew:           Duration{30 * time.Second},
+				HTTPTimeout:         Duration{5 * time.Second},
+			},
 		},
 		Store: Store{
 			Mode: StoreModeMemory,
@@ -361,17 +401,28 @@ func (c Config) Validate() error {
 		c.Server.ReadinessTimeout.Duration <= 0 {
 		return fmt.Errorf("server timeouts must be positive")
 	}
-	// Dev-header auth trusts unauthenticated identity headers (ADR-0004), so
-	// it may only serve loopback binds: anything routable beyond this host
-	// would expose tenant switching to the network. Enforced here so an
-	// operator cannot ship the development posture to a real interface.
-	if c.Server.DevHeaderAuth {
-		host, _, err := net.SplitHostPort(c.Server.HTTPAddr)
-		if err != nil {
-			return fmt.Errorf("server.http_addr %q is not host:port", c.Server.HTTPAddr)
+	// OIDC posture (ADR-0019): the issuer must be reachable over TLS unless
+	// it literally serves from this machine, so a production deployment can
+	// never point at a plaintext remote IdP by accident. Partial OIDC
+	// configuration is rejected: a typo'd audience or claim name must fail
+	// startup instead of silently authenticating nobody.
+	if c.Auth.OIDC.Configured() {
+		if err := c.Auth.OIDC.Validate(); err != nil {
+			return fmt.Errorf("auth.oidc: %w", err)
 		}
-		if !isLoopbackHost(host) {
-			return fmt.Errorf("server.dev_header_auth must not listen on %q: bind a loopback address (127.0.0.1, ::1, localhost) or disable dev auth and deploy OIDC", c.Server.HTTPAddr)
+	} else {
+		// All-or-nothing: with issuer_url absent, ANY other deviation from
+		// the defaults is a typo that must fail startup instead of being
+		// silently ignored — a stray audience, claim name, or timeout would
+		// otherwise sit dormant until the day OIDC gets switched on.
+		o := c.Auth.OIDC
+		def := Defaults().Auth.OIDC
+		if o.Audience != "" ||
+			o.TenantClaim != def.TenantClaim ||
+			o.JWKSRefreshInterval != def.JWKSRefreshInterval ||
+			o.ClockSkew != def.ClockSkew ||
+			o.HTTPTimeout != def.HTTPTimeout {
+			return fmt.Errorf("auth.oidc: partial configuration without auth.oidc.issuer_url; configure the full block or none of it")
 		}
 	}
 	switch c.Store.Mode {
@@ -436,11 +487,55 @@ func (c Config) Validate() error {
 	return nil
 }
 
-// isLoopbackHost reports whether a literal host binds only this machine.
+// Validate checks the OIDC block's internal invariants. It assumes the block
+// is fully configured (issuer_url non-empty); partial configuration is
+// rejected by Config.Validate before this runs.
+func (o OIDC) Validate() error {
+	u, err := url.Parse(o.IssuerURL)
+	if err != nil || u.Scheme == "" || u.Host == "" {
+		return fmt.Errorf("issuer_url %q must be an absolute URL", o.IssuerURL)
+	}
+	// Plaintext HTTP only for literal loopback IdPs (local Keycloak): the
+	// same rule the dev-auth gate used, applied to the issuer trust root.
+	if u.Scheme != "https" && !IsLoopbackHost(u.Hostname()) {
+		return fmt.Errorf("issuer_url %q must use https outside loopback", o.IssuerURL)
+	}
+	if strings.TrimSpace(o.Audience) == "" {
+		return fmt.Errorf("audience is required")
+	}
+	if len(o.Audience) > 255 || strings.ContainsAny(o.Audience, " \t\r\n") {
+		return fmt.Errorf("audience must be 1-255 characters without whitespace")
+	}
+	if o.TenantClaim == "" {
+		return fmt.Errorf("tenant_claim is required")
+	}
+	// JWT claim names are restricted so a misconfigured claim can never be
+	// silently interpreted as a nested path or exotic key.
+	for _, r := range o.TenantClaim {
+		switch {
+		case r >= 'a' && r <= 'z', r >= 'A' && r <= 'Z', r >= '0' && r <= '9', r == '_', r == '-':
+		default:
+			return fmt.Errorf("tenant_claim %q may only contain letters, digits, underscore and hyphen", o.TenantClaim)
+		}
+	}
+	if o.JWKSRefreshInterval.Duration < time.Second || o.JWKSRefreshInterval.Duration > 24*time.Hour {
+		return fmt.Errorf("jwks_refresh_interval must be within [1s,24h], got %s", o.JWKSRefreshInterval)
+	}
+	if o.ClockSkew.Duration < 0 || o.ClockSkew.Duration > 5*time.Minute {
+		return fmt.Errorf("clock_skew must be within [0,5m], got %s", o.ClockSkew)
+	}
+	if o.HTTPTimeout.Duration < 100*time.Millisecond || o.HTTPTimeout.Duration > 30*time.Second {
+		return fmt.Errorf("http_timeout must be within [100ms,30s], got %s", o.HTTPTimeout)
+	}
+	return nil
+}
+
+// IsLoopbackHost reports whether a literal host binds only this machine.
 // Only literal loopback IPs and the reserved name "localhost" qualify; other
 // names would require DNS resolution inside validation, which must stay
-// deterministic and offline.
-func isLoopbackHost(host string) bool {
+// deterministic and offline. Exported because the authn transport rule
+// (issuer, jwks_uri, redirect targets) reuses the exact same definition.
+func IsLoopbackHost(host string) bool {
 	if host == "localhost" {
 		return true
 	}
@@ -519,13 +614,28 @@ func (c *Config) ApplyEnv(lookup LookupFunc) error {
 	if err := str(envServerAddr, &c.Server.HTTPAddr); err != nil {
 		return err
 	}
-	if err := boolVar(envServerDevAuth, &c.Server.DevHeaderAuth); err != nil {
-		return err
-	}
 	if err := durVar(envServerIdleTimeout, &c.Server.IdleTimeout); err != nil {
 		return err
 	}
 	if err := durVar(envServerReadinessTimeout, &c.Server.ReadinessTimeout); err != nil {
+		return err
+	}
+	if err := str(envAuthOIDCIssuerURL, &c.Auth.OIDC.IssuerURL); err != nil {
+		return err
+	}
+	if err := str(envAuthOIDCAudience, &c.Auth.OIDC.Audience); err != nil {
+		return err
+	}
+	if err := str(envAuthOIDCTenantClaim, &c.Auth.OIDC.TenantClaim); err != nil {
+		return err
+	}
+	if err := durVar(envAuthOIDCJWKSRefresh, &c.Auth.OIDC.JWKSRefreshInterval); err != nil {
+		return err
+	}
+	if err := durVar(envAuthOIDCClockSkew, &c.Auth.OIDC.ClockSkew); err != nil {
+		return err
+	}
+	if err := durVar(envAuthOIDCHTTPTimeout, &c.Auth.OIDC.HTTPTimeout); err != nil {
 		return err
 	}
 	mode := string(c.Store.Mode)
@@ -650,9 +760,14 @@ func (c *Config) ApplyEnv(lookup LookupFunc) error {
 // Environment variable names. Kept in one place so docs and code cannot drift.
 const (
 	envServerAddr                    = "ANTS_SERVER_HTTP_ADDR"
-	envServerDevAuth                 = "ANTS_SERVER_DEV_AUTH"
 	envServerIdleTimeout             = "ANTS_SERVER_IDLE_TIMEOUT"
 	envServerReadinessTimeout        = "ANTS_SERVER_READINESS_TIMEOUT"
+	envAuthOIDCIssuerURL             = "ANTS_AUTH_OIDC_ISSUER_URL"
+	envAuthOIDCAudience              = "ANTS_AUTH_OIDC_AUDIENCE"
+	envAuthOIDCTenantClaim           = "ANTS_AUTH_OIDC_TENANT_CLAIM"
+	envAuthOIDCJWKSRefresh           = "ANTS_AUTH_OIDC_JWKS_REFRESH_INTERVAL"
+	envAuthOIDCClockSkew             = "ANTS_AUTH_OIDC_CLOCK_SKEW"
+	envAuthOIDCHTTPTimeout           = "ANTS_AUTH_OIDC_HTTP_TIMEOUT"
 	envStoreMode                     = "ANTS_STORE_MODE"
 	envStorePostgresDSN              = "ANTS_STORE_POSTGRES_DSN"
 	envStorePgMaxOpen                = "ANTS_STORE_POOL_MAX_OPEN_CONNS"
@@ -690,8 +805,10 @@ const (
 )
 
 var knownEnvVars = map[string]bool{
-	envServerAddr: true, envServerDevAuth: true,
+	envServerAddr:        true,
 	envServerIdleTimeout: true, envServerReadinessTimeout: true,
+	envAuthOIDCIssuerURL: true, envAuthOIDCAudience: true, envAuthOIDCTenantClaim: true,
+	envAuthOIDCJWKSRefresh: true, envAuthOIDCClockSkew: true, envAuthOIDCHTTPTimeout: true,
 	envStoreMode: true, envStorePostgresDSN: true,
 	envStorePgMaxOpen: true, envStorePgMaxIdle: true,
 	envOrchMaxParallel: true, envOrchMaxTasksRun: true, envOrchMaxExecOpsRun: true,

@@ -8,14 +8,9 @@
 # ANTS_STORE_POSTGRES_DSN; diagnostics always render secrets as [REDACTED].
 
 server:
-  # Loopback by default. Exposing Ants publicly requires an authenticated edge;
-  # dev header auth below must stay off for anything non-local — startup
-  # refuses dev auth on any non-loopback bind (ADR-0004).
+  # Loopback by default. Exposing Ants publicly requires an authenticated edge
+  # and an https identity provider (see auth.oidc below).
   http_addr: "127.0.0.1:8080"
-  # Development-only authentication: trusts X-Ants-Dev-Tenant /
-  # X-Ants-Dev-Principal headers. NEVER enable outside local development;
-  # production deployments use OIDC (planned) and leave this false.
-  dev_header_auth: true
   read_timeout: 10s
   write_timeout: 30s
   # Idle keep-alive connections are closed after this long so load balancers
@@ -25,6 +20,31 @@ server:
   # Bounds each /readyz dependency check; a slow database must fail the probe
   # fast instead of hanging the health endpoint.
   readiness_timeout: 2s
+
+auth:
+  oidc:
+    # Resource-server OIDC (ADR-0019): authenticated routes accept
+    # `Authorization: Bearer <access token>` issued by this provider. Leave
+    # the whole block unset to refuse every authenticated request with
+    # problem code authentication_not_configured — there is no development
+    # bypass anywhere in the configuration surface.
+    #
+    # issuer_url names the realm/deployment; it must be https unless it
+    # literally serves from loopback (local Keycloak for development).
+    # audience must appear in every accepted token's `aud` claim.
+    # tenant_claim names the verified claim carrying the Ants tenant slug;
+    # the claim value is grammar-checked and resolved against the tenant
+    # store on every request.
+    # issuer_url: "http://127.0.0.1:8081/realms/ants"
+    # audience: "ants-api"
+    tenant_claim: "ants_tenant"
+    # Cached JWKS documents refresh lazily after this long, plus once more on
+    # any unknown key id (rotation), rate-limited to one fetch per second.
+    jwks_refresh_interval: 15m
+    # Tolerance for IdP clock drift on exp/nbf checks.
+    clock_skew: 30s
+    # Bounds discovery/JWKS HTTP exchanges.
+    http_timeout: 5s
 
 store:
   # memory: deterministic zero-dependency mode for development and tests.

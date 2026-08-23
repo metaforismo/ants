@@ -90,13 +90,13 @@ func num(t *testing.T, m map[string]any, key string) float64 {
 func loggedEnv(t *testing.T) (*env, *logCapture) {
 	t.Helper()
 	cfg := config.Defaults()
-	cfg.Server.DevHeaderAuth = true
 	application := buildApp(t, cfg)
 	capture := &logCapture{}
 	ready := &flippableReadiness{}
 	srv, err := server.New(server.Deps{
 		Config:  cfg,
 		Repos:   application.Repos,
+		Auth:    &fakeAuthenticator{tenants: application.Repos.Tenants},
 		Uow:     application.Uow,
 		Engine:  application.Engine,
 		Logger:  slogCaptureJSON(capture),
@@ -130,16 +130,14 @@ func TestRequestLogsAreRedactedAndNormalized(t *testing.T) {
 	)
 
 	headers := map[string]string{
-		"Authorization":        "Bearer " + authSentinal,
-		"Cookie":               "session=" + cookieSentinel,
-		"X-Ants-Dev-Tenant":    "acme-" + uniqueSuffix(),
-		"X-Ants-Dev-Principal": principalID,
-		"Content-Type":         "application/json",
+		"Authorization": "Bearer " + authSentinal,
+		"Cookie":        "session=" + cookieSentinel,
+		"Content-Type":  "application/json",
 	}
 	body := fmt.Sprintf(`{"slug":"redact-%s","name":"%s"}`, uniqueSuffix(), bodySentinel)
 	status, hdr, raw := e.do(http.MethodPost, "/v1/tenants?token="+querySentinel, headers, body)
 	if status != http.StatusCreated {
-		t.Fatalf("precondition: tenant creation failed: %d (%s)", status, truncate(raw))
+		t.Fatalf("precondition: tenant creation failed: %d (%s)", status, raw)
 	}
 	var created struct {
 		Slug string `json:"slug"`
@@ -147,7 +145,10 @@ func TestRequestLogsAreRedactedAndNormalized(t *testing.T) {
 	if err := json.Unmarshal(raw, &created); err != nil || created.Slug == "" {
 		t.Fatalf("precondition: tenant creation response undecodable (%v)", err)
 	}
-	headers["X-Ants-Dev-Tenant"] = created.Slug
+	// Authenticate the identifier-bearing probe with the sentinel principal
+	// embedded in the credential, so the log must prove identifiers survive
+	// real authenticated traffic without leaking.
+	headers["Authorization"] = "Bearer " + created.Slug + ":" + principalID
 
 	// A resource-identifier-bearing route: the raw thread ID must never be
 	// logged even though the request really carried one.

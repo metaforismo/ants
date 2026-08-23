@@ -48,12 +48,12 @@ func createTenantWithCorrelation(e *env, slug, requestID string) (int, string) {
 	return status, hdr.Get("X-Request-ID")
 }
 
-// devHeaders builds authenticated headers carrying an optional correlation id.
-func devHeaders(tenantSlug, requestID string) map[string]string {
+// authedHeaders builds authenticated headers carrying an optional
+// correlation id.
+func authedHeaders(tenantSlug, requestID string) map[string]string {
 	h := map[string]string{
-		"X-Ants-Dev-Tenant":    tenantSlug,
-		"X-Ants-Dev-Principal": testPrincipal,
-		"Content-Type":         "application/json",
+		"Authorization": fakeToken(tenantSlug),
+		"Content-Type":  "application/json",
 	}
 	if requestID != "" {
 		h["X-Request-ID"] = requestID
@@ -134,7 +134,7 @@ func TestStartRunCarriesCorrelationIntoTransitionEvent(t *testing.T) {
 	_, threadID := e.seedProjectThread(slug)
 
 	runReqID := "run-start." + uniqueSuffix()
-	startHeaders := devHeaders(slug, runReqID)
+	startHeaders := authedHeaders(slug, runReqID)
 	startHeaders["Idempotency-Key"] = "key-" + uniqueSuffix()
 	status, hdr, raw := e.do(http.MethodPost, "/v1/threads/"+threadID+"/runs", startHeaders, "")
 	if status != http.StatusAccepted {
@@ -365,7 +365,7 @@ func TestWorkerExecutionKeepsNoRequestIdentity(t *testing.T) {
 	_, threadID := e.seedProjectThread(e.tenantAS)
 
 	runReqID := "worker-isolation." + uniqueSuffix()
-	headers := devHeaders(e.tenantAS, runReqID)
+	headers := authedHeaders(e.tenantAS, runReqID)
 	headers["Idempotency-Key"] = "key-" + uniqueSuffix()
 	status, hdr, raw := e.do(http.MethodPost, "/v1/threads/"+threadID+"/runs", headers, "")
 	if status != http.StatusAccepted {

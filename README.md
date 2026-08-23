@@ -13,7 +13,8 @@ verification commands. On top of it, execution is durable: state transitions,
 events, and their deliveries commit atomically (unit of work + transactional
 outbox), runs are dispatched through tenant-scoped run claims with fencing and
 bounded retries by a process-level worker, and the server exposes honest
-readiness, loopback-confined dev auth, bounded HTTP lifecycles, and Prometheus
+readiness, OIDC bearer authentication with a deny-by-default refusal posture,
+bounded HTTP lifecycles, and Prometheus
 metrics with fixed-vocabulary labels. Dead-lettered deliveries are operable:
 `ants outbox dead-letter list/show/requeue/discard` inspects poison messages
 and restarts or terminally discards them under a compare-and-swap fencing
@@ -43,7 +44,19 @@ is proven by an automated restart-convergence test against disposable
 PostgreSQL — redelivery without duplicated logical effects and with
 correlation history byte-identical across the crash.
 
-Read the [master plan](docs/MASTER_PLAN.md) for the complete product and implementation strategy. The condensed [resources index](docs/RESOURCES.md) links directly to the repositories, documentation, papers, and product research that accelerate development. Architecture decisions live in [docs/adr](docs/adr); the current implementation state and its proof matrix live in [docs/TRANCHE_3_5_EVIDENCE.md](docs/TRANCHE_3_5_EVIDENCE.md), with per-tranche records alongside (latest: [Tranche 3.5 request↔event correlation propagation](docs/TRANCHE_3_5_EVIDENCE.md)).
+Authentication is production-grade: the API is an OIDC resource server
+(ADR-0019). Authenticated routes accept `Authorization: Bearer` tokens issued
+by a configured identity provider (Keycloak locally), verified for RS256
+signature against cached JWKS keys with rotation support, exact issuer match,
+audience containment, and validity windows with bounded clock skew; tenant
+and subject are derived only from verified claims and re-resolved per
+request. The development header bypass was deleted outright. A disposable
+Keycloak fixture (`scripts/test-keycloak.sh`, deterministic realm import)
+proves the full path locally for free: service-principal client-credentials
+tokens drive tenant-scoped pipelines end to end, foreign tenants keep uniform
+404s, and wrong-audience or tampered tokens fail with typed problems.
+
+Read the [master plan](docs/MASTER_PLAN.md) for the complete product and implementation strategy. The condensed [resources index](docs/RESOURCES.md) links directly to the repositories, documentation, papers, and product research that accelerate development. Architecture decisions live in [docs/adr](docs/adr); the current implementation state and its proof matrix live in [docs/TRANCHE_3_6_EVIDENCE.md](docs/TRANCHE_3_6_EVIDENCE.md), with per-tranche records alongside (latest: [Tranche 3.6 OIDC resource-server foundation](docs/TRANCHE_3_6_EVIDENCE.md)).
 
 ## Quick start
 
@@ -52,6 +65,7 @@ make build
 ./bin/ants demo run            # full pipeline: real commits + real test execution
 ./bin/ants demo run --scm memory --sandbox fake   # scripted variant (no subprocesses)
 make ci                        # complete quality gate
+scripts/test-keycloak.sh       # OIDC integration suite against disposable Keycloak
 ```
 
 Serve the HTTP API locally:
@@ -60,6 +74,11 @@ Serve the HTTP API locally:
 ./bin/ants serve --config config/ants.example.yaml
 curl -s localhost:8080/healthz
 ```
+
+Authenticated `/v1` routes need an OIDC bearer token: set `auth.oidc.*` in
+the configuration (or `ANTS_AUTH_OIDC_*` environment variables) to point at
+your identity provider; without it the server refuses every authenticated
+route with `authentication_not_configured`.
 
 The process also exposes Prometheus metrics at `/metrics` on the same
 listener (aggregate operational series with fixed-vocabulary labels; disable
