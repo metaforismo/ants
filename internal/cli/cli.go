@@ -67,7 +67,7 @@ Commands:
   migrate up       apply PostgreSQL migrations (requires store.mode postgres)
   serve            start the /v1 API server
   demo run         execute the deterministic vertical slice locally
-  outbox           dead-letter inspection, requeue, and discard (ADR-0015)
+  outbox           dead-letter operations and retention sweeps (ADR-0015, ADR-0016)
 
 Use "ants <command> -h" for command-specific flags.
 `)
@@ -191,6 +191,23 @@ func RunServe(args []string, stdout, stderr io.Writer) int {
 		}
 	}()
 
+	// Bounded retention rounds run only when a horizon is configured
+	// (ADR-0016); the loop is inert otherwise. Stopped FIRST during
+	// shutdown: destructive maintenance must not compete with the drain
+	// phases, and skipping one round never leaves partial state.
+	retentionCtx, stopRetention := context.WithCancel(context.Background())
+	retentionDone := make(chan struct{})
+	if application.Retention.Active() {
+		go func() {
+			defer close(retentionDone)
+			if err := application.Retention.Run(retentionCtx); err != nil && retentionCtx.Err() == nil {
+				application.Logger.Error("outbox retention loop stopped unexpectedly", "error", err.Error())
+			}
+		}()
+	} else {
+		close(retentionDone)
+	}
+
 	serverFailed := false
 	select {
 	case err := <-serverErr:
@@ -215,6 +232,12 @@ func RunServe(args []string, stdout, stderr io.Writer) int {
 	defer cancelDrain()
 
 	var drainErr error
+	stopRetention()
+	select {
+	case <-retentionDone:
+	case <-drainCtx.Done():
+		drainErr = errors.Join(drainErr, fmt.Errorf("outbox retention loop did not stop within the shutdown budget"))
+	}
 	if err := srv.Shutdown(drainCtx); err != nil {
 		drainErr = errors.Join(drainErr, fmt.Errorf("http server: %w", err))
 	}
