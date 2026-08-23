@@ -67,9 +67,15 @@ client ──(HTTPS edge)── API [verifies JWT] ──(loopback trust)── 
 ```
 
 The IdP is outside the trust boundary: its metadata and keys are consumed
-over HTTP with strict validation (exact `issuer` match per OIDC Discovery 4.3,
-`https` required except literal loopback hosts so local Keycloak stays
-testable without weakening production posture).
+over HTTP with strict validation. The transport rule — `https` everywhere,
+plaintext allowed only for literal loopback hosts so local Keycloak stays
+testable without weakening production posture — applies to the issuer, to
+the discovery document's `jwks_uri`, and to every redirect target followed
+while fetching either. The discovery document's `issuer` must equal the
+configured value exactly, with one tolerated difference: a single trailing
+slash may appear on either side, mirroring how the `.well-known` URL is
+formed from an issuer with a path component (RFC 8414 §4.3); any other
+mismatch refuses the provider.
 
 ## Decisions
 
@@ -92,8 +98,10 @@ without it.
 3. Signature via JWKS keys (`kid` match). Unknown `kid` triggers one forced
    JWKS refresh (rate-limited to one per second process-wide) then a single
    retry — this is the key-rotation path; persistent failure →
-   `invalid_token_signature`. JWKS fetch failures are transient
-   (`auth_provider_unavailable`, 503).
+   `invalid_token_signature`. Every IdP exchange, the rotation refresh
+   included, runs under `auth.oidc.http_timeout`, so a hung provider can
+   stall a request no longer than the configuration allows. JWKS fetch
+   failures are transient (`auth_provider_unavailable`, 503).
 4. Claims: exact `iss == configured issuer`; `aud` must contain the
    configured audience; `exp` required and unexpired; `nbf` honored;
    `sub` required — all with configurable clock skew (default 30s). Distinct
@@ -114,19 +122,22 @@ configured.
 
 **Discovery and key lifecycle.** At startup-readiness (and lazily on first
 verification) the authenticator fetches `{issuer}/.well-known/openid-
-configuration`, requires the document's `issuer` to equal the configured
-value byte-for-byte, extracts `jwks_uri`, and fetches the key set. The key
-set is cached for `auth.oidc.jwks_refresh_interval` (default 15m) and probed
-for refresh lazily on subsequent verifications plus forcibly on unknown
-`kid`. No background goroutines; every fetch runs under the request or
-readiness context with `auth.oidc.http_timeout` bounding it. Restarting the
-process re-fetches everything: no auth state survives restart, which is also
-the restart story.
+configuration`, requires the document's `issuer` to match the configured
+value as specified above, extracts `jwks_uri`, and fetches the key set.
+The key set is cached for `auth.oidc.jwks_refresh_interval` (default 15m)
+and probed for refresh lazily on subsequent verifications plus forcibly on
+unknown `kid`. No background goroutines; every fetch runs under the request or
+readiness context with `auth.oidc.http_timeout` bounding it — the rotation
+retry included, which is what keeps a hung JWKS endpoint from riding on the
+server-level write deadline instead. Restarting the process re-fetches
+everything: no auth state survives restart, which is also the restart story.
 
 **Readiness joins the chain.** When OIDC is configured, the composition root
 extends `/readyz` with discovery + JWKS warm-up under the existing readiness
 timeout, so a misconfigured issuer fails the probe fast instead of surfacing
-per-request later.
+per-request later; a failing warm-up reports its own typed problem code
+(`auth_provider_unavailable`) rather than the generic persistence one, so
+the probe names the dependency that actually failed.
 
 **Metrics.** One counter `ants_auth_tokens_total{result}` with a fixed
 result vocabulary (accepted, rejected_missing, rejected_header,

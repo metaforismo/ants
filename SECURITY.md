@@ -24,8 +24,12 @@ networks.
 - Authentication is OIDC resource-server verification (ADR-0019): every
   authenticated route requires a bearer JWT whose signature, issuer,
   audience, validity window, algorithm (RS256 only), subject, and tenant
-  claim are verified server-side against keys fetched over discovery/JWKS;
-  tenant and subject are derived exclusively from verified claims, and the
+  claim are verified server-side against keys fetched over discovery/JWKS.
+  All provider traffic obeys one transport rule — https unless the host is
+  literally loopback — applied to the issuer URL, the discovery document's
+  `jwks_uri`, and every redirect target; every IdP exchange is bounded by
+  the configured HTTP timeout.
+  Tenant and subject are derived exclusively from verified claims, and the
   tenant must resolve in the tenant store before any request proceeds. With
   no provider configured, every authenticated route refuses with a typed
   problem — there is no development bypass anywhere in the configuration

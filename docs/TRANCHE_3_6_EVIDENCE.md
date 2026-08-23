@@ -142,6 +142,81 @@ against the final committed code state; containers were removed afterwards
 `.local/tranche-3_6/` remain gitignored and are removed after evidence
 capture.
 
+## Independent security & release-readiness audit (PR #20, pre-merge)
+
+An independent auditor re-derived every claim above from the exact PR head
+(`d4d3451`) and the full diff against `origin/main`, without trusting this
+record. Verification order (RS256 allowlist before key selection), claim
+classification, JWKS duplicate-kid refusal, stale-cache availability, RFC
+6750 challenge conditionality, leakage paths, exit-code propagation in
+scripts, dev-header removal, and dependency provenance were each re-checked
+and held. Findings the audit did surface, all fixed on this branch with
+regression tests that were mutation-checked (each test shown to fail against
+the reverted fix):
+
+1. **Rotation refresh bypassed `http_timeout`** (medium): the unknown-kid
+   forced JWKS fetch ran on the raw request context, contradicting R8 — a
+   hung IdP would stall requests up to the server write deadline. Fixed
+   (`authenticator.go`); regression `TestRotationRefreshBoundedByHTTPTimeout`
+   (pre-fix behavior observed: indefinite block).
+2. **`jwks_uri` escaped the transport rule** (medium-low): discovery accepted
+   a plaintext remote `jwks_uri` from any issuer, so key fetching could walk
+   onto http while the issuer itself was https-confined. Fixed
+   (`discovery.go`); regressions `TestDiscoveryAppliesTransportRuleToJWKSURI`,
+   `TestIDPRedirectPolicy`.
+3. **No redirect policy** (low-medium): the default HTTP client followed
+   redirects across scheme downgrades and arbitrary hosts during discovery
+   and JWKS fetches. The verifier now installs a CheckRedirect policy
+   mirroring the transport rule; pinned by `TestDefaultClientCarriesRedirectPolicy`
+   and end-to-end `TestAuthenticateRefusesDowngradeRedirects`.
+4. **Partial-config validation was not all-or-nothing** (low): with
+   `issuer_url` empty, only an audience typo was rejected; stray
+   `tenant_claim`/`clock_skew`/`http_timeout`/`jwks_refresh_interval` values
+   sat dormant. Any deviation from defaults now fails startup;
+   regressions added to `TestValidationFailures` /
+   `TestOIDCPartialConfigurationRejected`.
+5. **`/readyz` mislabeled IdP failures** (low): a failed OIDC warm-up
+   reported `store_unavailable`/"persistence layer". The readiness chain now
+   reports typed problems (`auth_provider_unavailable`);
+   regression `TestReadyzReportsTypedProviderFailure`.
+6. **Vacuous rate-limit assertion in `TestKeyRotation`** (test-quality): the
+   counted window used cache-valid tokens, so it exercised zero forced
+   refreshes despite its comment. Rewritten around revoked-kid attempts with
+   an exact fetch-count assertion.
+7. **ADR wording overclaims** (doc): "byte-exact issuer match" — the code
+   tolerates one trailing-slash difference symmetrically; ADR now states the
+   implemented rule precisely.
+8. **Keycloak fixture readiness gate could not pass as committed**
+   (high, fixture-only): the realm set `sslRequired: external`, but behind a
+   Docker port mapping the container only ever sees NAT source addresses,
+   so Keycloak answered every metadata request with `HTTPS required` and the
+   script's own wait loop could never succeed. Whatever produced the
+   original "suite 8.52s" line, the committed fixture does not reproduce it;
+   the audit treats that evidence line as invalid. Fixed deterministically:
+   `sslRequired: none` in the throwaway realm plus `-p 127.0.0.1:` loopback
+   binding in `scripts/test-keycloak.sh`. The full suite now passes from a
+   clean clone state, verified verbosely (`-v -race`) so every live proof
+   shows RUN/PASS rather than SKIP.
+9. **Claimed live cross-tenant proof was missing** (medium, evidence): the
+   PR body, README, and row R4 promised a live uniform-404 cross-tenant
+   suite; no such test existed. Added `TestKeycloakCrossTenantIsolation`
+   (real client_credentials tokens for acme vs other service principals:
+   foreign list carries no identifiers, direct thread read/message append/
+   run start are uniform `thread_not_found` 404s) — passing against real
+   Keycloak.
+
+Audit gate results (direct exits, final code state of this branch):
+gofmt clean · vet 0 · staticcheck@2026.2.1 0 · tidy idempotent · manifest 0 ·
+unit 0 · race 0 (23 pkgs) · focused stress `-race -count=60`
+(server+authn+config+correlation) 0 · PG16 integration suite 0 ·
+Keycloak integration script 0 plus verbose live run 0 · `make ci` 0 ·
+`make build` 0 · `make demo` 0 · live-binary smoke rebuilt by the auditor
+(`.local/audit-pr20/smoke.sh`: real `ants-api` binary + fixture Keycloak)
+0 — 12 checks PASS including typed challenge header on the wire
+(`Www-Authenticate` canonicalization), wrong-audience/tampered refusals,
+cross-tenant isolation, correlation echo, auth counter exposure, absence of
+token material from server logs, and container cleanup afterwards.
+
 ## Prompt for PR 3.7 (next tranche)
 
 "You are the sole coding agent for Ants Tranche 3 / PR 3.7. Work in
