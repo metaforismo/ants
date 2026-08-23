@@ -147,6 +147,17 @@ limitation. Nothing about the session posture changes: the new read is one
 more bearer-token call through the same proxy, and cross-tenant misses still
 render as uniform not-available copy (ADR-0004).
 
+Update (2026-08-23, adversarial pagination audit): reattachment no longer
+assumes any single bounded page holds the newest run. The workspace issues
+one React Query traversal (`listAllThreadRuns`) that walks positional
+oldest-first pages until the authoritative `total` is consumed, so the true
+latest run is the final item however long the history grows; concurrent
+tail appends during a walk extend it within bounded guards rather than
+racing a waterfall of ad-hoc requests. The list contract stays
+newest-last-on-purpose: positional offsets are stable precisely because new
+runs append only at the tail, which is why a newest-first + OFFSET shape
+was rejected.
+
 ## Non-goals
 
 - Memberships, roles, invitations, RBAC — the authorization model remains

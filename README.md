@@ -63,7 +63,9 @@ outcome, start a run, watch its live event trail resume from sequence
 cursors, cancel, and read the terminal report. Reopening a thread anywhere
 reattaches to its live/latest run: the console discovers runs through
 `GET /v1/threads/{id}/runs` (stable oldest-first history with cursor
-pagination), so the panel follows the thread rather than the browser tab.
+pagination), walking every bounded page through the authoritative total so
+the true latest run is found however long the history grows — the panel
+follows the thread rather than the browser tab.
 The browser never holds credentials: a server-side BFF attaches bearer tokens
 itself, the session lives in one AES-256-GCM-sealed `HttpOnly` cookie,
 silent renewal is serialized against refresh-token rotation, mutations carry

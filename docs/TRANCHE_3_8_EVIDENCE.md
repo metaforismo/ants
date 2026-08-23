@@ -181,3 +181,119 @@ defect ledger, and residual risks in docs/TRANCHE_3_9_EVIDENCE.md; commit
 coherently, push, open one small PR linking evidence, wait for hosted
 checks, fix failures in focused commits, stop before merge, and report URL,
 head SHA, gates, limitations, residual risks, and a concrete PR 3.10 prompt."
+
+---
+
+# Audit addendum (2026-08-23, later session) — adversarial pagination review of PR #22
+
+An independent adversarial audit of this PR's reattachment claim was started
+in a prior session and interrupted, leaving an uncommitted mixed worktree on
+`feat/thread-run-history` @ `3e4fa58a5489dc555f2b47b566dce540f963537b`
+(unchanged remote head; nothing had been committed or pushed). This addendum
+records what that worktree contained, what release coordination decided, and
+what this session actually changed. PR #22 remains unmerged; all additions
+below are additive to the tranche record above.
+
+## Pre-fix state (verified from the dirty tree before any edit)
+
+- **Correct failing reproduction** (`TestListThreadRunsSurfacesNewestRun-
+  BeyondPageSize`, since rewritten — see below): seeded 205 runs (>200
+  server default page), fetched page one exactly as the workspace did, and
+  failed with:
+  `RELEASE BLOCKER: single bounded page hides the true newest run
+  run_eR4asC87Er1pSqeRqN1ri3hdlE behind older history; page starts at
+  run_niXPAxbsFUWpYxCkYXvSnFelpg`
+  (archived at `.local/audit-3_8/gates/repro-fail.log`; re-confirmed fresh
+  after fixing the worktree's build errors in
+  `.local/audit-3_8/gates/prefix-repro-fresh.log`). The defect was real:
+  the console read exactly one page, so any thread with more runs than one
+  bounded page reattached to a stale run.
+- **Correct cursor-validation direction**: negative/malformed/overflow
+  `after` values silently fell back to 0 (200 + empty page) because
+  `queryInt64` swallowed parse errors; the draft introduced typed rejection.
+- **Build errors**: the draft's `parseAfterCursor` returned `error` while
+  `writeProblem` requires `*domain.Error` (three call sites failed to
+  compile).
+- **Rejected implementation**: the same draft flipped ports/memory/
+  Postgres/tests/docs to newest-first `(created_at desc, id desc)` +
+  positional OFFSET.
+
+## Design decision (release coordination, applied here)
+
+**Newest-first plus positional OFFSET is rejected.** It is not stable under
+append-only inserts: every new run lands at the head and shifts every
+offset, so a reader resuming with an old cursor sees duplicates and misses.
+The accepted shape keeps the server **oldest-first positional** — new runs
+append only at the tail, existing offsets never move — and moves the
+latest-run guarantee into the client: walk bounded pages from `after=0`
+through the authoritative `total` and take the final item as the true
+latest. A concurrent tail append during traversal may grow `total`; the
+walk consumes the grown total within bounded guards instead of racing.
+
+## Changes made in this session (all additive to the audit trail)
+
+1. **Oldest-first contract restored everywhere** — `ports.RunStore.ListByThread`
+   doc (now states the append-only stability property and that the newest
+   run is the last item of the final page), memory comparator, PostgreSQL
+   query, `storetest.testRunListByThread`, `TestListThreadRuns`,
+   `handleListThreadRuns` comment, OpenAPI description. The rejected
+   window-function count variant was dropped with it.
+2. **Strict shared cursor grammar kept and completed** — `parseAfterCursor`
+   returns typed problems; grammar matches the OpenAPI schema exactly
+   (omitted = 0; otherwise one decimal-digit int64 ≥ 0). Repeated values,
+   explicit empties, whitespace/sign padding, floats, negatives,
+   non-digits, and >int64 overflows are `invalid_cursor` 400s across ALL
+   three list endpoints (runs, messages, events) — pinned by
+   `TestListThreadRunsCursorGrammar`. Leading zeros are accepted (value
+   equality); documented. Postgres `rows.Err()` is now wrapped via
+   `wrapScan` instead of returned raw.
+3. **Snapshot boundary stated honestly** — the Postgres COUNT and SELECT
+   are separate statements and NOT one atomic snapshot; correctness under
+   concurrent inserts comes solely from oldest-first append-only ordering
+   (tail appends cannot shift positions). Documented on the adapter; no
+   multi-request snapshot consistency claimed anywhere.
+4. **Append-between-pages stability proven** — the shared store contract
+   now seeds a run between two page requests and asserts the resumed page
+   continues without duplicate or missing entries (memory PASS; PostgreSQL
+   row rides the hosted CI job, BLOCKED locally per the Docker note above).
+5. **>page-size API boundary test, constants derived** —
+   `TestListThreadRunsPaginationReachesTrueLatest` seeds 205 runs, derives
+   the server page length from the first response (no copy of the private
+   `defaultPageLimit`), tripwires if one page could cover the seed count,
+   then walks pages black-box style to prove full coverage, zero overlap,
+   and the true latest run as the final item.
+6. **Console traverses through one helper** — `collectRunHistory`
+   (`apps/web/src/lib/runs.ts`) walks pages until the authoritative total
+   is consumed, tolerating mid-walk growth (bounded by growth-step and
+   absolute page caps) and refusing to loop forever on contract violations
+   (`no_progress`, `duplicate_run`, `history_shrank`, `unbounded_traversal`
+   — each unit-tested). `api.listAllThreadRuns` wraps it; `WorkspaceView`
+   uses it as its single React Query `queryFn`, preserving the existing
+   polling rule with no duplicate concurrent requests and no waterfall of
+   chained queries. Ten vitest cases cover multi-page, exact boundaries,
+   empty history, growth, and every guard.
+
+## Gates recorded this session
+
+| Gate | Command | Exit | Notes |
+|---|---|---|---|
+| Pre-fix reproduction (fresh) | focused `go test` on dirty tree | 1 | build errors first observed, then repro failure captured after compile fix |
+| Focused Go (server+stores) post-fix | `go test -count=1 ./internal/server/ ./internal/store/...` | 0 | `.local/audit-3_8/gates/go-focused-fixed.log` |
+| Focused race post-fix | `go test -race` same packages | 0 | `.local/audit-3_8/gates/go-race-fixed.log` |
+| Web unit suite | `pnpm --filter @ants/web test` | 0 | 62 passed / 9 files (10 new traversal cases) |
+| Full hermetic CI (final tree) | `. .local/gate-env.sh && env -u GOTOOLCHAIN make ci` | **0** | `.local/audit-3_8/gates/make-ci-final-audit.log`; fmt/vet/staticcheck/tidy/manifest clean, Go unit+race all packages ok, build ok, contracts test+drift ok, web typecheck/lint/test/build ok |
+| Intermediate-commit greenness | `go test -count=1 ./internal/server/ ./internal/store/storetest/` at `7de43c2` in a detached worktree | 0 | the cursor-grammar commit passes against the then-unchanged oldest-first stores |
+
+Docker-backed suites remain BLOCKED locally for the exact reasons recorded
+above (single degraded-daemon probe, sandbox blocks Chromium); their
+verdicts ride hosted checks on the pushed head.
+
+## Residual risks added by this addendum
+
+- The client traversal re-reads `total` per page but does not snapshot the
+  store; if a run were ever deleted mid-walk the guards fail closed
+  (`history_shrank`) rather than return a wrong history. Runs deletion
+  remains nonexistent today (see retention ADR-0016 scope).
+- `RUN_HISTORY_MAX_PAGES`/`RUN_HISTORY_MAX_GROWTH_STEPS` are generous
+  backstops, not licenses: a tenant genuinely outgrowing them gets a loud
+  typed error in the runs panel, not silent truncation.
