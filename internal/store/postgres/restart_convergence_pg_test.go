@@ -559,8 +559,10 @@ func assertCorrelationSurvivesRestart(t *testing.T, pool *sql.DB, seeded []seede
 
 	for _, s := range seeded {
 		var eventTrace, envelopeTrace string
+		// Envelopes serialize with trace_id omitted when empty (the domain
+		// field is omitempty), so the JSON extraction coalesces NULL to ''.
 		err := pool.QueryRowContext(ctx,
-			`SELECT e.trace_id, o.envelope->>'trace_id'
+			`SELECT e.trace_id, coalesce(o.envelope->>'trace_id', '')
 			   FROM events e
 			   JOIN outbox o ON o.dedup_key = 'event:' || $1
 			  WHERE e.id = $1`, string(s.id)).Scan(&eventTrace, &envelopeTrace)
