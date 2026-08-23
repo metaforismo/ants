@@ -415,8 +415,10 @@ func seedRunForKey(t *testing.T, repos ports.Repositories, thread *domain.Thread
 
 // testRunListByThread pins the read contract behind GET /v1/threads/{id}/runs:
 // only the caller's own runs come back, oldest first in the stable
-// (created_at, id asc) order, honoring cursor and limit, with foreign or
-// unknown threads uniformly not-found (ADR-0004) while a known empty thread
+// (created_at asc, id asc) order, honoring cursor and limit; a run appended
+// between two page requests lands at the tail and causes no duplicate or
+// missing entry for a reader walking increasing cursors. Foreign or unknown
+// threads are uniformly not-found (ADR-0004) while a known empty thread
 // yields an empty page.
 func testRunListByThread(t *testing.T, repos ports.Repositories) {
 	ctx := context.Background()
@@ -433,18 +435,19 @@ func testRunListByThread(t *testing.T, repos ports.Repositories) {
 	second := seedRunForKey(t, repos, thread, "list-2", fixedTime(20))
 	// Equal created_at must still yield one deterministic order on every
 	// store implementation: ties resolve by ascending id.
-	tieB := seedRunForKey(t, repos, thread, "tie-b", fixedTime(30))
 	tieA := seedRunForKey(t, repos, thread, "tie-a", fixedTime(30))
+	tieB := seedRunForKey(t, repos, thread, "tie-b", fixedTime(30))
+	newest := seedRunForKey(t, repos, thread, "list-newest", fixedTime(40))
 	seedRunForKey(t, repos, foreignThread, "foreign", fixedTime(15))
 
 	tieFirst, tieSecond := tieA.ID, tieB.ID
 	if tieSecond < tieFirst {
 		tieFirst, tieSecond = tieSecond, tieFirst
 	}
-	wantOrder := []domain.RunID{first.ID, second.ID, tieFirst, tieSecond}
+	wantOrder := []domain.RunID{first.ID, second.ID, tieFirst, tieSecond, newest.ID}
 
 	list, total, err := repos.Runs.ListByThread(ctx, tenantID, thread.ID, 0, 0)
-	if err != nil || total != 4 {
+	if err != nil || total != 5 {
 		t.Fatalf("full list: %d runs, total %d, err %v", len(list), total, err)
 	}
 	for i, want := range wantOrder {
@@ -454,15 +457,15 @@ func testRunListByThread(t *testing.T, repos ports.Repositories) {
 	}
 
 	page, total, err := repos.Runs.ListByThread(ctx, tenantID, thread.ID, 0, 2)
-	if err != nil || total != 4 || len(page) != 2 {
+	if err != nil || total != 5 || len(page) != 2 {
 		t.Fatalf("limited first page: %d runs, total %d, err %v", len(page), total, err)
 	}
-	if page[1].ID != wantOrder[1] {
-		t.Fatalf("limit must keep the earliest entries: %+v", page)
+	if page[0].ID != wantOrder[0] || page[1].ID != wantOrder[1] {
+		t.Fatalf("limit must keep the earliest entries in order: %+v", page)
 	}
 
 	rest, total, err := repos.Runs.ListByThread(ctx, tenantID, thread.ID, 2, 0)
-	if err != nil || total != 4 || len(rest) != 2 {
+	if err != nil || total != 5 || len(rest) != 3 {
 		t.Fatalf("page after cursor: %d runs, total %d, err %v", len(rest), total, err)
 	}
 	if rest[0].ID != wantOrder[2] {
@@ -470,8 +473,38 @@ func testRunListByThread(t *testing.T, repos ports.Repositories) {
 	}
 
 	beyond, total, err := repos.Runs.ListByThread(ctx, tenantID, thread.ID, int64(len(wantOrder))+100, 0)
-	if err != nil || total != 4 || len(beyond) != 0 {
+	if err != nil || total != 5 || len(beyond) != 0 {
 		t.Fatalf("beyond-max cursor must be an empty page: %d/%d %v", len(beyond), total, err)
+	}
+
+	// Append-only stability: a run inserted BETWEEN two page requests lands
+	// at the tail only. A reader resuming at its old cursor neither sees the
+	// new run twice nor loses any run it had not yet read — positional
+	// offsets stay valid, which is exactly why newest-first + OFFSET was
+	// rejected (insertion at the head would shift every offset).
+	appended := seedRunForKey(t, repos, thread, "list-appended-midwalk", fixedTime(50))
+	resumed, total, err := repos.Runs.ListByThread(ctx, tenantID, thread.ID, 2, 0)
+	if err != nil || total != 6 || len(resumed) != 4 {
+		t.Fatalf("resume after concurrent append: %d runs, total %d, err %v", len(resumed), total, err)
+	}
+	wantResumed := append(append([]domain.RunID{}, wantOrder[2:]...), appended.ID)
+	for i, want := range wantResumed {
+		if resumed[i].ID != want {
+			t.Fatalf("resumed position %d = %s, want %s (tail append must not reshuffle)", i, resumed[i].ID, want)
+		}
+	}
+	seen := map[domain.RunID]bool{}
+	for _, id := range []domain.RunID{page[0].ID, page[1].ID} {
+		seen[id] = true
+	}
+	for _, run := range resumed {
+		if seen[run.ID] {
+			t.Fatalf("concurrent tail append produced duplicate %s across page requests", run.ID)
+		}
+		seen[run.ID] = true
+	}
+	if len(seen) != 6 {
+		t.Fatalf("walk across the append must cover all 6 runs exactly once, saw %d", len(seen))
 	}
 
 	empty, total, err := repos.Runs.ListByThread(ctx, tenantID, emptyThread.ID, 0, 0)

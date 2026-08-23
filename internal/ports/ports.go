@@ -74,11 +74,16 @@ type RunStore interface {
 	Update(ctx context.Context, run *domain.Run, expectedVersion int64) error
 	GetByIdempotencyKey(ctx context.Context, tenantID domain.TenantID, threadID domain.ThreadID, key string) (*domain.Run, error)
 	// ListByThread returns one page of the thread's run history, oldest
-	// first in the stable (created_at, id asc) order. `after` is the number
-	// of runs to skip from that order's start; runs are never deleted, so
-	// positions are stable. A known thread with no runs yields an empty
-	// slice; an unknown or foreign-tenant thread yields uniform not-found
-	// (ADR-0004), never a distinguishable absence.
+	// first in the stable (created_at asc, id asc) order. `after` is the
+	// number of runs to skip from that order's start. Runs are never deleted
+	// and new runs append only at the tail, so existing positions never
+	// reshuffle: a reader walking increasing cursors sees every run exactly
+	// once even when concurrent starts grow the total between page requests.
+	// The newest run is therefore the last item of the final page, not of
+	// the first one; consumers wanting it must traverse to the end.
+	// limit <= 0 means no limit. A known thread with no runs yields an
+	// empty slice; an unknown or foreign-tenant thread yields uniform
+	// not-found (ADR-0004), never a distinguishable absence.
 	ListByThread(ctx context.Context, tenantID domain.TenantID, threadID domain.ThreadID, after int64, limit int) ([]*domain.Run, int64, error)
 }
 

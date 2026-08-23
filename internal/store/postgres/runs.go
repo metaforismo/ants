@@ -179,6 +179,17 @@ func (r *RunRepository) GetByIdempotencyKey(ctx context.Context, tenantID domain
 		string(tenantID), string(threadID), key))
 }
 
+// ListByThread serves one positional page in the stable oldest-first order.
+//
+// Snapshot boundary, stated precisely: COUNT and SELECT are separate
+// statements and do NOT form one atomic snapshot. That is safe here only
+// because the ordering is append-only — runs are never deleted and new runs
+// land at the tail, so a concurrent insert can grow `total` but cannot
+// reshuffle or shift any position below the tail. Pages fetched with
+// increasing cursors therefore never duplicate or skip; the total a caller
+// observed earlier may simply be stale-low. No multi-request snapshot
+// consistency is claimed or required (the console traversal re-reads the
+// authoritative total on every page).
 func (r *RunRepository) ListByThread(ctx context.Context, tenantID domain.TenantID, threadID domain.ThreadID, after int64, limit int) ([]*domain.Run, int64, error) {
 	var total int64
 	err := r.st.q(ctx).QueryRowContext(ctx,
@@ -215,7 +226,10 @@ func (r *RunRepository) ListByThread(ctx context.Context, tenantID domain.Tenant
 		}
 		out = append(out, run)
 	}
-	return out, total, rows.Err()
+	if err := rows.Err(); err != nil {
+		return nil, 0, wrapScan(err)
+	}
+	return out, total, nil
 }
 
 // checkThreadVisible resolves the uniform not-found for a list against an
