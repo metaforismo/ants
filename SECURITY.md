@@ -29,8 +29,13 @@ networks.
 - Dev header authentication is confined to loopback binds at startup
   (ADR-0013) and must never be enabled outside local development; full OIDC
   replaces it in a later horizon.
-- The outbox dispatcher is single-process; multi-node delivery scale-out and
-  outbox retention/GC are deferred (ADR-0011, ADR-0013, ADR-0015).
+- The outbox dispatcher is single-process; multi-node delivery scale-out is
+  deferred (ADR-0011, ADR-0013).
+- Outbox retention/GC (ADR-0016) deletes only terminal `delivered`/`discarded`
+  rows beyond explicitly configured horizons; it is structurally inert by
+  default and can never touch pending, leased, or dead rows, domain events,
+  or audit history. Manual sweeps run through the local CLI with an explicit
+  confirmation flag; scheduled sweeps only start when a horizon is set.
 - Dead-letter requeue/discard runs through the local CLI over the store seam:
   whoever can run it holds database privileges, the same trust level as
   `migrate up`. Every mutation is fenced by a compare-and-swap generation and

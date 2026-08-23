@@ -75,6 +75,14 @@ not_found, invalid_request, failed}; identifiers never become labels. The
 existing `ants_outbox_messages{state}` gauge gains the `discarded` state
 sample.
 
+Amendment (2026-08-23, reviewed with ADR-0016): two instruments join for
+retention/GC through the same observer seam —
+`ants_outbox_retention_deleted_total{state}` with state ∈ {delivered,
+discarded} and `ants_outbox_retention_rounds_total` counting every
+successful sweep including empty rounds. State is a fixed vocabulary;
+tenant and message identifiers never become labels. Previews never fire
+observers, so instrumentation cannot alter sweep behavior.
+
 ## Consequences
 
 - Every later subsystem (integrations, scheduler, sandbox drivers) adds its

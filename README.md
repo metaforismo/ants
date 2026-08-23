@@ -18,9 +18,13 @@ metrics with fixed-vocabulary labels. Dead-lettered deliveries are operable:
 `ants outbox dead-letter list/show/requeue/discard` inspects poison messages
 and restarts or terminally discards them under a compare-and-swap fencing
 credential, with every intervention committed as event + delivery + audit in
-one unit of work (ADR-0015).
+one unit of work (ADR-0015). Retention is bounded and explicit: terminal
+rows (`delivered`, `discarded`) are collected by configured horizons in
+atomic oldest-first rounds — never pending, leased, or dead rows, and never
+events or audit history — through `ants outbox retention preview/sweep` and,
+optionally, a scheduled loop (ADR-0016).
 
-Read the [master plan](docs/MASTER_PLAN.md) for the complete product and implementation strategy. The condensed [resources index](docs/RESOURCES.md) links directly to the repositories, documentation, papers, and product research that accelerate development. Architecture decisions live in [docs/adr](docs/adr); the current implementation state and its proof matrix live in [docs/TRANCHE_3_2_EVIDENCE.md](docs/TRANCHE_3_2_EVIDENCE.md), with per-tranche records alongside (latest: [Tranche 3.2 outbox dead-letter operations](docs/TRANCHE_3_2_EVIDENCE.md)).
+Read the [master plan](docs/MASTER_PLAN.md) for the complete product and implementation strategy. The condensed [resources index](docs/RESOURCES.md) links directly to the repositories, documentation, papers, and product research that accelerate development. Architecture decisions live in [docs/adr](docs/adr); the current implementation state and its proof matrix live in [docs/TRANCHE_3_3_EVIDENCE.md](docs/TRANCHE_3_3_EVIDENCE.md), with per-tranche records alongside (latest: [Tranche 3.3 outbox retention/GC](docs/TRANCHE_3_3_EVIDENCE.md)).
 
 ## Quick start
 
@@ -43,7 +47,8 @@ listener (aggregate operational series with fixed-vocabulary labels; disable
 with `metrics.enabled: false`, see ADR-0014).
 
 Poisoned deliveries are operated through the CLI (see
-[docs/runbooks/outbox-operations.md](docs/runbooks/outbox-operations.md)).
+[docs/runbooks/outbox-operations.md](docs/runbooks/outbox-operations.md)),
+which also covers bounded retention sweeps over terminal rows.
 
 The API is specified by [openapi/v1/openapi.yaml](openapi/v1/openapi.yaml); TypeScript types are generated into `packages/contracts`.
 
