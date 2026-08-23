@@ -1,0 +1,189 @@
+{
+  "realm": "ants",
+  "enabled": true,
+  "sslRequired": "external",
+  "accessTokenLifespan": 900,
+  "clients": [
+    {
+      "clientId": "ants-api",
+      "enabled": true,
+      "protocol": "openid-connect",
+      "publicClient": false,
+      "standardFlowEnabled": false,
+      "directAccessGrantsEnabled": false,
+      "serviceAccountsEnabled": false,
+      "secret": "fixture-ants-api-audience-marker"
+    },
+    {
+      "clientId": "acme-service",
+      "enabled": true,
+      "protocol": "openid-connect",
+      "publicClient": false,
+      "secret": "fixture-acme-secret",
+      "standardFlowEnabled": false,
+      "directAccessGrantsEnabled": false,
+      "serviceAccountsEnabled": true,
+      "protocolMappers": [
+        {
+          "name": "ants-tenant",
+          "protocol": "openid-connect",
+          "protocolMapper": "oidc-usermodel-attribute-mapper",
+          "config": {
+            "user.attribute": "ants_tenant",
+            "claim.name": "ants_tenant",
+            "jsonType.label": "String",
+            "id.token.claim": "false",
+            "access.token.claim": "true",
+            "userinfo.token.claim": "false"
+          }
+        },
+        {
+          "name": "ants-api-audience",
+          "protocol": "openid-connect",
+          "protocolMapper": "oidc-audience-mapper",
+          "config": {
+            "included.client.audience": "ants-api",
+            "access.token.claim": "true"
+          }
+        }
+      ]
+    },
+    {
+      "clientId": "other-service",
+      "enabled": true,
+      "protocol": "openid-connect",
+      "publicClient": false,
+      "secret": "fixture-other-secret",
+      "standardFlowEnabled": false,
+      "directAccessGrantsEnabled": false,
+      "serviceAccountsEnabled": true,
+      "protocolMappers": [
+        {
+          "name": "ants-tenant",
+          "protocol": "openid-connect",
+          "protocolMapper": "oidc-usermodel-attribute-mapper",
+          "config": {
+            "user.attribute": "ants_tenant",
+            "claim.name": "ants_tenant",
+            "jsonType.label": "String",
+            "id.token.claim": "false",
+            "access.token.claim": "true",
+            "userinfo.token.claim": "false"
+          }
+        },
+        {
+          "name": "ants-api-audience",
+          "protocol": "openid-connect",
+          "protocolMapper": "oidc-audience-mapper",
+          "config": {
+            "included.client.audience": "ants-api",
+            "access.token.claim": "true"
+          }
+        }
+      ]
+    },
+    {
+      "clientId": "wrongaud-service",
+      "enabled": true,
+      "protocol": "openid-connect",
+      "publicClient": false,
+      "secret": "fixture-wrongaud-secret",
+      "standardFlowEnabled": false,
+      "directAccessGrantsEnabled": false,
+      "serviceAccountsEnabled": true,
+      "protocolMappers": [
+        {
+          "name": "ants-tenant",
+          "protocol": "openid-connect",
+          "protocolMapper": "oidc-usermodel-attribute-mapper",
+          "config": {
+            "user.attribute": "ants_tenant",
+            "claim.name": "ants_tenant",
+            "jsonType.label": "String",
+            "id.token.claim": "false",
+            "access.token.claim": "true",
+            "userinfo.token.claim": "false"
+          }
+        }
+      ]
+    },
+    {
+      "clientId": "alice-direct",
+      "enabled": true,
+      "protocol": "openid-connect",
+      "publicClient": false,
+      "secret": "fixture-alice-direct-secret",
+      "standardFlowEnabled": false,
+      "directAccessGrantsEnabled": true,
+      "serviceAccountsEnabled": false,
+      "protocolMappers": [
+        {
+          "name": "ants-tenant",
+          "protocol": "openid-connect",
+          "protocolMapper": "oidc-usermodel-attribute-mapper",
+          "config": {
+            "user.attribute": "ants_tenant",
+            "claim.name": "ants_tenant",
+            "jsonType.label": "String",
+            "id.token.claim": "false",
+            "access.token.claim": "true",
+            "userinfo.token.claim": "false"
+          }
+        },
+        {
+          "name": "ants-api-audience",
+          "protocol": "openid-connect",
+          "protocolMapper": "oidc-audience-mapper",
+          "config": {
+            "included.client.audience": "ants-api",
+            "access.token.claim": "true"
+          }
+        }
+      ]
+    }
+  ],
+  "users": [
+    {
+      "username": "service-account-acme-service",
+      "enabled": true,
+      "serviceAccountClientId": "acme-service",
+      "attributes": {
+        "ants_tenant": ["acme"]
+      }
+    },
+    {
+      "username": "service-account-other-service",
+      "enabled": true,
+      "serviceAccountClientId": "other-service",
+      "attributes": {
+        "ants_tenant": ["other"]
+      }
+    },
+    {
+      "username": "service-account-wrongaud-service",
+      "enabled": true,
+      "serviceAccountClientId": "wrongaud-service",
+      "attributes": {
+        "ants_tenant": ["acme"]
+      }
+    },
+    {
+      "username": "alice",
+      "enabled": true,
+      "email": "alice@fixture.local",
+      "emailVerified": true,
+      "firstName": "Alice",
+      "lastName": "Fixture",
+      "attributes": {
+        "ants_tenant": ["acme"]
+      },
+      "credentials": [
+        {
+          "type": "password",
+          "value": "fixture-alice-password",
+          "temporary": false
+        }
+      ]
+    }
+  ]
+}
