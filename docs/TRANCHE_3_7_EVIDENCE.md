@@ -53,15 +53,59 @@ Exit codes captured into repo-local ignored logs under
 | pnpm install (lockfile honest) | `pnpm install --frozen-lockfile --offline` | 0 ("Already up to date") |
 | Web typecheck | `pnpm --filter @ants/web typecheck` | 0 |
 | Web lint | `pnpm --filter @ants/web lint` | 0 |
-| Web unit/component tests | `pnpm --filter @ants/web test` | 0 (42 tests / 7 files) |
+| Web unit/component tests | `pnpm --filter @ants/web test` | 0 (52 tests / 7 files, incl. renewal-decision matrix) |
 | Web production build | `pnpm --filter @ants/web build` | 0 |
 | Full hermetic CI (pre-deslop) | `make ci` (fmt, vet, staticcheck, tidy-check, manifest-check, unit, race, build, contracts-test, contracts-drift, web-typecheck/lint/test/build) | 0 |
 | Manifest check (after npm entries) | `go run ./scripts/manifestcheck` | 0 |
-| Full hermetic CI (final tree, post deslop+polish) | `make ci` | 0 |
+| Full hermetic CI (final tree) | `make ci` | 0 |
 | HTTP surface inspection | `.local/tranche-3_7/ui-inspect/http-inspect.mjs` vs production build + loopback mock | 0 (15/15 PASS) — **mock-based, labeled below** |
-| Go unit/race/build/contracts | included in `make ci` above | 0 |
 
-## BLOCKED — Docker-backed suites (exact cause)
+## Remote checks (GitHub Actions, PR #21)
+
+The new `web-e2e` job executes `scripts/test-web-e2e.sh` on a healthy hosted
+runner — the browser proof that was Docker-blocked locally. It required
+several fix iterations; each failure was diagnosed from uploaded Playwright
+traces and fixed with its own commit. Final state: **all four jobs pass**
+(`Go build/lint/tests`, `TypeScript contracts`, `Web console gates`,
+`Browser E2E`) — 9/9 E2E specs green, including the operate journey
+(login → project → thread → message → run → live events → terminal report),
+silent token renewal across the provider's 60-second fixture lifespan,
+provider-side revocation degrading to re-authentication, tampered-cookie
+refusal, mobile viewport, keyboard-only login, and reduced motion.
+
+Defects the hosted run exposed and this branch fixes:
+
+1. **redirect_uri instability**: Next normalizes request Host in route
+   handlers (loopback collapses 127.0.0.1→localhost), so the code exchange
+   presented a different redirect_uri than the authorization request;
+   provider refused with invalid_grant. All protocol URLs/redirects now
+   derive from the validated `ANTS_WEB_URL` origin.
+2. **Fixture realm dropped `sub`**: Keycloak 25+ moved `sub` into the
+   built-in `basic` default client scope; the ants-web client overrode
+   defaultClientScopes without it, so user access tokens carried no subject
+   and the ADR-0019 pipeline refused them (`missing_subject`).
+3. **Cookie-budget overflow**: storing access+refresh+ID tokens sealed past
+   Chromium's ~4 KiB per-cookie cap — browsers silently drop the cookie,
+   producing an invisible infinite-login loop. ID token no longer stored
+   (logout proceeds without id_token_hint); writeSession enforces a loud
+   3800-byte budget.
+4. **Refresh-rotation race across concurrent requests**: the renewal lock
+   re-read the requesting request's frozen cookie, letting a sibling replay
+   the pre-rotation refresh token and destroy the renewed session. Renewed
+   states now live in a bounded process-local map; decision extracted into a
+   pure tested function (`selectFreshSession`, 5 unit rows).
+5. **JSON-null arrays crashed the UI**: Go nil slices marshal as null where
+   the contract says array (observed on a failed run's report); ReportView
+   hit `.length` of null and took the surface to the error boundary.
+   Arrays normalized at render boundaries.
+6. **Cross-test interference in E2E**: user-wide admin revocation killed
+   parallel sessions of the same shared fixture user; lifecycle tests now
+   use dedicated identities (bob/carol).
+7. **E2E prompt vs capability catalog**: the deterministic planner requires
+   all declared request keywords; the operate spec now requests add+multiply
+   matching the calc-demo catalog (product behaved as designed).
+
+## BLOCKED — Docker-backed suites locally (exact cause)
 
 The operator reported Docker Desktop degraded after a prior disk-full event:
 backend processes present, daemon calls hanging. Constraints: no restart,
@@ -171,18 +215,27 @@ session's external font download was correctly reverted — see audit log).
 
 ## Residual risks (explicit)
 
-- Browser E2E did not run on a developer machine this session (BLOCKED
-  above). If the CI `web-e2e` job fails, the PR must not merge until green;
-  the failure artifacts upload makes diagnosis direct.
-- The mock-based inspection cannot speak to Keycloak form behavior, real
-  token lifetimes, or API pipeline semantics — only the committed E2E suite
-  (CI) covers those.
+- Browser E2E never ran on a developer machine this session (Docker and the
+  machine sandbox both blocked); proof comes solely from hosted CI runs.
+  The suite is deterministic against the committed fixture realm, but a
+  local auditor with a healthy daemon should still execute
+  `scripts/test-web-e2e.sh` once independently.
+- Keycloak-version coupling: the `basic` default-scope behavior that broke
+  user tokens exists since KC 25; deployments pinning other KC versions must
+  keep the fixture's explicit scope list in sync with their provider.
+- The mock-based inspection cannot speak to Keycloak form behavior or real
+  token lifetimes; the committed Playwright suite covers those only where it
+  actually ran (hosted CI).
 - `ANTS_SESSION_KEY` mishandling (reuse across environments, weak value)
-  is the main operational risk of the sealed-cookie design; validation
+  remains the main operational risk of the sealed-cookie design; validation
   enforces length only, uniqueness is procedural.
-- Renewal serialization is process-wide; a pathological mass-expiry storm
-  adds bounded latency (correctness preserved by lock re-read), but very
-  long renew queues would benefit from metrics in a later tranche.
+- The renewed-session cache is per process. A multi-process/multi-instance
+  console deployment reintroduces refresh-rotation races across processes;
+  single-process `next start` (current posture) is safe, and the limitation
+  is recorded in ADR-0020 consequences.
+- Renewal serialization is process-wide; pathological mass expiry adds
+  bounded latency (correctness preserved by lock re-read plus cache), but
+  renewal metrics would be a welcome later addition.
 
 ## Prompt for PR 3.8 (next tranche)
 

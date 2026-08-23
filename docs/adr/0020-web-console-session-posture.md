@@ -153,10 +153,14 @@ the current membership model, not a property of the session design.
 - Refresh tokens rest server-side in sealed cookies; a host compromise
   yields active sessions but no long-term tenant credentials beyond the
   IdP's own refresh-token lifetime policies.
-- The renewal queue serializes across the whole process, not per session;
-  worst case under mass simultaneous expiry is bounded latency, not
-  correctness risk, because each renewal re-reads current state under the
-  lock.
+- The renewal queue serializes across the whole process, and renewed states
+  are cached process-locally so concurrent requests never replay a rotated
+  refresh token; a multi-process or multi-instance console deployment would
+  reintroduce cross-instance rotation races and needs a shared renewal
+  store before it is safe.
+- E2E lifecycle tests use dedicated fixture identities because provider-side
+  revocation is user-global: any test revoking sessions must never share a
+  user with tests running in parallel.
 - E2E proof of the full browser flow (login → operate → revoke → renew)
   requires the disposable Keycloak fixture and is recorded separately in the
   tranche evidence; unit tests pin every decision above that does not need a
