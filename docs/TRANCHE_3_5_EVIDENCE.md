@@ -30,7 +30,7 @@ change (`trace_id` was already in the Event schema).
 | R5 | One grammar; no drift between header acceptance, event trace ids, audit correlation, operator `--trace-id` | Grammar lives once in `correlation.Valid`; middleware consumes it (local copy deleted); `ports.OutboxMutationRequest.Validate` rejects non-empty trace ids failing the grammar → typed `outbox_trace_id` invalid error enforced by BOTH store adapters before any write | `TestOutboxMutationRequestValidatesTraceIDGrammar` (valid pass-through incl. previously documented forms; malformed/oversized rejected with stable code); smoke step 9 (CLI rejects `"bad id"` with zero audit writes) |
 | R6 | Non-HTTP callers keep documented behavior, never a fabricated HTTP identity | Worker execution, dispatch, retention, demo, plain CLI run without a carrier → empty trace ids; outboxops takes provenance exclusively from explicit operator input (ambient can never override) | `TestWorkerExecutionKeepsNoRequestIdentity` (run created over HTTP with an id; all execution-phase events empty); policy background-context assertion; restart suite seeds prove store-level fidelity independent of any HTTP path |
 | R7 | Transaction behavior: rollback leaves no orphan/mismatched records; redelivery replays the published correlation unchanged | Correlation only fills a field on records already atomic under UoW/outbox (ADR-0010/0011); envelopes serialize once at publish | `TestFailedEventUnitLeavesNoMismatchedCorrelation` (scripted event-store outage → 503, no tenant/event/delivery rows; recovery stamps the surviving event with ITS OWN attempt's id, failed attempt's id absent); PG `assertCorrelationSurvivesRestart` |
-| R8 | Correlation survives durable outbox persistence, process death/redelivery; final history unchanged | Restart-convergence suite extended: each seeded event carries its own correlation id; after SIGKILL mid-dispatch + epoch-two drain, both durable copies must match byte-for-byte — `events.trace_id` AND `outbox.envelope->>'trace_id'` (NULL coalesced for omitempty) | `TestOutboxDeliveryConvergesAcrossProcessRestart` PASS 3.50s race-enabled PG16; broken variant (seeding empty traces) fails loudly two ways: "exactly 6 events must carry their seed correlations, got 0" + NULL scan error — assertions are regression-meaningful |
+| R8 | Correlation survives durable outbox persistence, process death/redelivery; final history unchanged | Restart-convergence suite extended: each seeded event carries its own correlation id; after SIGKILL mid-dispatch + epoch-two drain, both durable copies must match byte-for-byte — `events.trace_id` AND `outbox.envelope->>'trace_id'` (NULL coalesced for omitempty) | `TestOutboxDeliveryConvergesAcrossProcessRestart` PASS 3.50s race-enabled PG16; broken variant (seeding empty traces) fails loudly three ways — "exactly 6 events must carry their seed correlations, got 0", per-event `trace_id drifted`, and per-event `redelivered envelope … lost its correlation` — assertions are regression-meaningful |
 | R9 | Exhaustive HTTP integration proofs incl. concurrency and cross-tenant negatives | `internal/server/correlation_propagation_test.go`: real client requests against the full composition root | concurrency: 12 parallel creations each persisting its own id with clash detection; cross-tenant: per-tenant lists contain only their own correlations; malformed bytes provably absent from durable records |
 | R10 | Live-binary disposable-PG smoke: header/log/event equality + redaction + clean SIGTERM | `.local/tranche-3_5/smoke-3_5.sh` (real `bin/ants`, real migrations, real dispatcher, scratch in gitignored `.local/tranche-3_5`, container removed afterwards) | 17/17 checks PASS (list below), including envelope-level equality and CLI `--trace-id` landing in both `events.trace_id` and `audit_events.trace_id` |
 
@@ -133,6 +133,48 @@ None. Every gate above executed to completion against the final code state
 in this session; containers were removed (`docker ps` shows no `ants-*`
 containers) and scratch/config files under `.local/tranche-3_5/` are
 gitignored and removed after evidence capture.
+
+## Independent audit (2026-08-23, head ac76b1d)
+
+A second agent re-audited the branch against the ADRs and re-executed the
+gates from a clean tree (scratch in gitignored `.local/audit-3_5`):
+
+- **Carrier safety:** unexported typed context key, stdlib-only leaf
+  package, single grammar copy, precedence encoded once — verified against
+  the full build graph. No globals, cycles, or server imports.
+- **Seam completeness:** production-wide enumeration found exactly three
+  event appenders (engine `emitEvent`, server `emitTenantEvent`, outboxops
+  with explicit operator provenance) and two audit appenders (policy
+  engine, outboxops); every HTTP route is wrapped by the carrier-producing
+  middleware; only tenant creation and StartRun commit records
+  synchronously.
+- **Fixes landed in ac76b1d:** ADR-0018/README/SECURITY wording corrected
+  to stop claiming end-to-end HTTP audit equality (no synchronous audit
+  seam exists); worker-isolation test now counts occurrences per trace so a
+  multi-event identity stamp fails instead of hiding behind map dedup.
+- **Broken variant re-run on final code** (seeds patched to empty traces,
+  then reverted): exit 1 with all three assertion classes firing — count
+  0 ≠ 6, per-event trace drift, per-event envelope drift. The R8 row above
+  was corrected accordingly: the previously recorded "NULL scan error"
+  described the pre-D5 assertion shape, not the final coalesced one.
+
+Re-execution at head `ac76b1d`, all logs under gitignored
+`.local/audit-3_5/` (exit codes captured directly from each command):
+gofmt(tracked) 0 · vet 0 · staticcheck@2026.2.1 0 · tidy diff-clean 0 ·
+manifest 0 · unit 0 (22 packages ok) · race 0 (22 packages ok) · focused
+stress `-race -count=60` over server/outbox/storetest/memory/correlation 0
+(server suite 83.9s) · `scripts/test-postgres.sh` 0 (postgres package
+13.0s incl. restart test; container removed by script) · verbose restart
+test `-race -v` on disposable PG16 0 ("epoch 1 crashed inside the sink as
+designed", "epoch 2 drained and exited 0", PASS 3.55s) · broken variant 1
+(FAIL as designed, reverted) · `make ci` 0 · `make build`+`make demo` 0 ·
+live-binary smoke rebuilt for `.local/audit-3_5/smoke-audit.sh`: real
+`bin/ants serve`, migrations 0001–0008, real dispatcher — 17/17 checks
+PASS, exit 0, including header==log==event==envelope equality for a
+header-sourced id, CLI `--trace-id` landing in both `events.trace_id` and
+`audit_events.trace_id`, malformed `--trace-id` rejected as typed
+`outbox_trace_id` with zero writes, sentinels absent from logs, SIGTERM
+exit 0. Smoke container and generated config removed afterwards.
 
 ## Prompt for PR 3.6 (next tranche, from the master plan)
 
