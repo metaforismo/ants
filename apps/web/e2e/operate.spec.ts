@@ -73,6 +73,7 @@ test.describe("operate journey", () => {
         const style = getComputedStyle(element);
         return {
           name,
+          missing: false,
           tag: element.tagName.toLowerCase(),
           id: element.id,
           className: typeof element.className === "string" ? element.className : "",
@@ -99,10 +100,11 @@ test.describe("operate journey", () => {
       const offenders = Array.from(document.body.querySelectorAll<HTMLElement>("*"))
         .map((element) => describe("offender", element))
         .filter(
-          (entry): entry is Exclude<typeof entry, { missing: true }> =>
-            !("missing" in entry) && (entry.left < -1 || entry.right > viewportWidth + 1),
+          (entry) =>
+            !entry.missing &&
+            ((entry.left ?? 0) < -1 || (entry.right ?? 0) > viewportWidth + 1),
         )
-        .sort((left, right) => right.right - left.right)
+        .sort((left, right) => (right.right ?? 0) - (left.right ?? 0))
         .slice(0, 12);
       const roots = [
         describe("html", document.documentElement),
