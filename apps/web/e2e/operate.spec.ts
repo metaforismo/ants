@@ -70,13 +70,28 @@ test.describe("operate journey", () => {
       const offenders = Array.from(document.body.querySelectorAll<HTMLElement>("*"))
         .map((element) => {
           const rect = element.getBoundingClientRect();
+          const style = getComputedStyle(element);
           return {
             tag: element.tagName.toLowerCase(),
             id: element.id,
-            className: element.className,
+            className: typeof element.className === "string" ? element.className : "",
             left: Math.round(rect.left * 10) / 10,
             right: Math.round(rect.right * 10) / 10,
             width: Math.round(rect.width * 10) / 10,
+            clientWidth: element.clientWidth,
+            scrollWidth: element.scrollWidth,
+            display: style.display,
+            position: style.position,
+            boxSizing: style.boxSizing,
+            computedWidth: style.width,
+            minWidth: style.minWidth,
+            maxWidth: style.maxWidth,
+            paddingLeft: style.paddingLeft,
+            paddingRight: style.paddingRight,
+            overflowX: style.overflowX,
+            whiteSpace: style.whiteSpace,
+            gridTemplateColumns: style.gridTemplateColumns,
+            flexBasis: style.flexBasis,
             text: (element.textContent ?? "").trim().replace(/\s+/g, " ").slice(0, 80),
           };
         })

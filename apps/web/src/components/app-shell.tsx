@@ -44,7 +44,11 @@ export function AppShell({
           </span>
         </div>
       </nav>
-      <main id="main" className="main">
+      <main
+        id="main"
+        className="main"
+        style={{ width: "100%", maxWidth: "100%" }}
+      >
         {children}
       </main>
     </div>
