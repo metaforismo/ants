@@ -208,6 +208,44 @@ p {
   gap: 8px;
 }
 
+.rail-nav {
+  flex: 1;
+  min-width: 0;
+}
+
+.rail-nav-link {
+  font-weight: 550;
+  text-decoration: none;
+}
+
+.rail-identity {
+  min-width: 0;
+  font-size: 12px;
+}
+
+.rail-tenant-label,
+.rail-user {
+  color: var(--ink-3);
+}
+
+.rail-tenant,
+.rail-user {
+  display: block;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.rail-user {
+  margin-top: 6px;
+}
+
+.rail-signout {
+  display: block;
+  margin-top: 8px;
+}
+
 .main {
   padding: 24px 32px 48px;
   min-width: 0;
@@ -535,10 +573,53 @@ p {
   .rail {
     flex-direction: row;
     align-items: center;
-    justify-content: space-between;
+    justify-content: flex-start;
+    flex-wrap: wrap;
+    column-gap: 16px;
+    row-gap: 8px;
     border-right: 0;
     border-bottom: 1px solid var(--hairline);
     padding: 12px 16px;
+  }
+
+  .rail > * {
+    min-width: 0;
+  }
+
+  .rail-brand {
+    flex: none;
+  }
+
+  .rail-nav {
+    flex: 1 1 auto;
+  }
+
+  .rail-identity {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    flex: 1 0 100%;
+    width: 100%;
+  }
+
+  .rail-tenant-label,
+  .rail-signout {
+    flex: none;
+  }
+
+  .rail-tenant {
+    flex: 0 1 120px;
+    max-width: 30vw;
+  }
+
+  .rail-user {
+    flex: 1 1 80px;
+    margin-top: 0;
+  }
+
+  .rail-signout {
+    margin-top: 0;
+    margin-left: auto;
   }
 
   .main {
