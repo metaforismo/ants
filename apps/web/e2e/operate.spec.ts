@@ -64,9 +64,36 @@ test.describe("operate journey", () => {
     const history = page.getByTestId("run-history");
     await expect(history).toBeVisible();
     await expect(history.locator(".run-row-id")).toBeHidden();
-    const overflow = await page.evaluate(
-      () => document.documentElement.scrollWidth - document.documentElement.clientWidth,
-    );
-    expect(overflow).toBeLessThanOrEqual(1);
+
+    const layout = await page.evaluate(() => {
+      const viewportWidth = document.documentElement.clientWidth;
+      const offenders = Array.from(document.body.querySelectorAll<HTMLElement>("*"))
+        .map((element) => {
+          const rect = element.getBoundingClientRect();
+          return {
+            tag: element.tagName.toLowerCase(),
+            id: element.id,
+            className: element.className,
+            left: Math.round(rect.left * 10) / 10,
+            right: Math.round(rect.right * 10) / 10,
+            width: Math.round(rect.width * 10) / 10,
+            text: (element.textContent ?? "").trim().replace(/\s+/g, " ").slice(0, 80),
+          };
+        })
+        .filter(({ left, right }) => left < -1 || right > viewportWidth + 1)
+        .sort((left, right) => right.right - left.right)
+        .slice(0, 12);
+
+      return {
+        overflow: document.documentElement.scrollWidth - viewportWidth,
+        viewportWidth,
+        offenders,
+      };
+    });
+
+    expect(
+      layout.overflow,
+      `horizontal overflow offenders: ${JSON.stringify(layout.offenders)}`,
+    ).toBeLessThanOrEqual(1);
   });
 });
