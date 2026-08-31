@@ -169,8 +169,17 @@ export function WorkspaceView({ threadId }: { threadId: string }) {
   }
 
   return (
-    <div style={{ display: "grid", gap: 20 }}>
-      <header className="page-head" style={{ marginBottom: 0 }}>
+    <div
+      style={{
+        display: "grid",
+        gridTemplateColumns: "minmax(0, 1fr)",
+        gap: 20,
+        minWidth: 0,
+        width: "100%",
+        maxWidth: "100%",
+      }}
+    >
+      <header className="page-head" style={{ marginBottom: 0, minWidth: 0 }}>
         <div style={{ minWidth: 0 }}>
           <h1>{thread.title}</h1>
           <p className="mono" style={{ color: "var(--ink-3)", margin: "2px 0 0", fontSize: 12 }}>
@@ -182,7 +191,7 @@ export function WorkspaceView({ threadId }: { threadId: string }) {
 
       {runSection}
 
-      <section aria-label="Conversation" style={{ display: "grid", gap: 12 }}>
+      <section aria-label="Conversation" style={{ display: "grid", gap: 12, minWidth: 0 }}>
         <h2>Conversation</h2>
         <MessageList
           messages={messages.map((m) => ({
