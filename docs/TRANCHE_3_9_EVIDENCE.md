@@ -1,6 +1,7 @@
 # Tranche 3.9 evidence — inherited P0 repair and truth synchronization
 
-Date: 2026-08-24
+Date: 2026-08-24  
+Hosted delivery verification: 2026-08-31
 
 This record covers the completion of the inherited
 `feat/run-history-navigator` working tree. It is current execution evidence,
@@ -25,10 +26,11 @@ hosted integrations are complete.
   the daemon did not answer and the probe was interrupted; no daemon restart,
   prune, or unrelated container action was attempted.
 
-Public GitHub state was checked read-only: the repository was public and
-Apache-2.0, PR #22 and its four checks were green at the starting commit, and
-no open PR, issue, or release was found. Hosted evidence applies to the
-starting commit only, not to this local tranche.
+At the initial audit, public GitHub state was checked read-only: the repository
+was public and Apache-2.0, PR #22 and its four checks were green at the starting
+commit, and no open PR, issue, or release was found. Later hosted delivery
+operations are recorded separately below rather than retroactively changing
+that starting fact.
 
 ## Delivered behavior
 
@@ -50,10 +52,13 @@ Regression coverage proves empty, 25, 26, and 250-run histories; both pager
 directions and all ten pages; a 25-row DOM maximum; exact row pinning;
 follow-latest polling; pinned polling and page shifts; browsing away from a
 selection; singular/plural newer-run notices; release-to-latest; native button
-focus; `aria-current`; and the polite page live region. The existing
-reduced-motion browser test remains in the suite, and the real operate journey
-now checks the run-history component at 390×844 with no horizontal overflow
-and the compact id treatment.
+focus; `aria-current`; and the polite page live region.
+
+The real operate journey also runs at 390×844. The responsive repair does not
+hide document overflow globally: it constrains intrinsic grid sizing, allows
+the composer field to shrink, contains wide verification evidence in a named
+keyboard-focusable region, and keeps long run and tenant identities from
+forcing the document wider than the viewport.
 
 ### B2 — typed malformed identifiers without an existence oracle
 
@@ -96,6 +101,8 @@ expanding this HTTP-boundary repair.
 
 ## Executed verification
 
+### Local verification inherited with the tranche
+
 | Command | Status | Exit | What it proved |
 | --- | --- | ---: | --- |
 | `. .local/gate-env.sh; pnpm --filter @ants/web exec vitest run tests/run-history.test.tsx` after adding regressions | FAIL (expected red) | 1 | Five product-behavior failures remained after test-harness corrections: inert paging and its polling/pin consequences. |
@@ -109,21 +116,39 @@ expanding this HTTP-boundary repair.
 | `git diff --check` | PASS | 0 | No whitespace errors after deslop. |
 | `. .local/gate-env.sh; GOTOOLCHAIN=local make ci` | FAIL (diagnostic) | 2 | Incorrectly forced the product toolchain onto Staticcheck; pinned Staticcheck requires Go ≥1.26. |
 | `. .local/gate-env.sh; env -u GOTOOLCHAIN make ci` before staging generated schema | FAIL (diagnostic) | 2 | Go/race/build and contract tests passed; the drift target correctly compared regenerated output with the Git index and found the intended unstaged schema. |
-| `git add packages/contracts/src/schema.d.ts`, then `. .local/gate-env.sh; env -u GOTOOLCHAIN make ci` | PASS | 0 | Complete canonical non-Docker gate: Go fmt, vet, pinned Staticcheck (auto-selected Go 1.26.7), tidy, manifest, all unit tests, race, binaries, 19 contract tests, generated drift, frozen pnpm install, web typecheck/lint, 83 tests, and Next.js production build. |
+| `git add packages/contracts/src/schema.d.ts`, then `. .local/gate-env.sh; env -u GOTOOLCHAIN make ci` | PASS | 0 | Complete canonical non-Docker gate: Go fmt, vet, pinned Staticcheck, tidy, manifest, all unit tests, race, binaries, contract tests, generated drift, frozen pnpm install, web typecheck/lint/tests, and Next.js production build. |
 
 The macOS linker printed `LC_DYSYMTAB` warnings while linking some race-test
 binaries. The affected packages executed and passed; the canonical gate exited
 0. This is recorded as an environment warning, not silently relabeled.
 
-## Blocked or not run
+### Hosted verification on the exact branch SHA
+
+Pull request #23 was exercised repeatedly while diagnosing a real mobile
+intrinsic-sizing regression. Failed intermediate browser runs were retained as
+failure evidence rather than bypassed with document-level clipping. GitHub
+Actions run `33439947149` then completed successfully on exact head:
+
+```text
+b5bf4f175cb898f93e709784f31a69fa9b562ffd
+```
+
+| GitHub Actions job | Status | Exit/result | What it proved |
+| --- | --- | ---: | --- |
+| TypeScript contracts | PASS | success | OpenAPI generation, generated drift, and contract tests are synchronized. |
+| Go build, lint, tests | PASS | success | Formatting, vet, pinned Staticcheck, tidy, manifest, PostgreSQL service integration, complete tests, race, binaries, deterministic smoke, and local-Git smoke pass. |
+| Web console gates | PASS | success | Frozen install, TypeScript, ESLint, 83 unit/component tests, and production Next.js build pass. |
+| Browser E2E (disposable Keycloak + real API) | PASS | success | Real OIDC login, project/thread/message/run/report journey, responsive run history at 390×844, reduced-motion/viewport suites, and no document-level horizontal overflow pass against the disposable stack. |
+
+## Environment-limited or deliberately unexecuted checks
 
 | Check | Status | Precise boundary |
 | --- | --- | --- |
-| `./scripts/test-web-e2e.sh` | BLOCKED | Requires the Docker-backed disposable Keycloak/API/browser stack; daemon did not answer the one bounded probe. The new mobile assertion is committed to this suite but not locally executed. |
-| `./scripts/test-postgres.sh` | BLOCKED | Requires disposable Docker PostgreSQL. Non-Docker store/unit contracts passed; that does not substitute for this integration suite. |
-| `./scripts/test-keycloak.sh` | BLOCKED | Requires disposable Docker Keycloak. OIDC unit tests passed; no live-container claim is made. |
-| `make ci-all` | BLOCKED | Aggregates the three Docker-dependent checks above. |
-| Linux/KVM, physical mobile devices, deployment, live SCM/model/billing providers | NOT RUN | No eligible host/device, no need for this block, and no authority for credentials, egress, payment, or external mutation. |
+| Local `./scripts/test-web-e2e.sh` | BLOCKED | The inherited macOS Docker daemon did not answer the one bounded probe. Equivalent hosted browser proof passed on the exact branch SHA; this does not relabel the local command as PASS. |
+| Local `./scripts/test-postgres.sh` | BLOCKED | Requires disposable local Docker PostgreSQL. The hosted Go job executed its PostgreSQL service integration successfully. |
+| Local `./scripts/test-keycloak.sh` | BLOCKED | Requires disposable local Docker Keycloak. The hosted browser job executed real Keycloak/OIDC behavior successfully. |
+| Local `make ci-all` | BLOCKED | Aggregates the three local Docker-dependent checks above. |
+| Linux/KVM, physical mobile devices, deployment, live SCM/model/billing providers | NOT RUN | No eligible host/device or product need in this block, and no authority was used for paid APIs, deployment, billing, or live third-party integration mutation. |
 
 ## Deslop and review
 
@@ -132,26 +157,35 @@ binaries. The affected packages executed and passed; the canonical gate exited
 - Kept selection resolution in the existing run helper instead of duplicating
   it in the component.
 - Removed redundant visual comments; retained comments only for polling,
-  selection, remount, auth, and anti-enumeration invariants.
+  selection, remount, auth, responsive and anti-enumeration invariants.
 - Replaced a bogus cross-tenant route assertion with real request surfaces.
 - Added one route-table-driven OpenAPI test rather than nine brittle named
   assertions.
 - Regenerated contracts from source; no generated file was hand-edited.
+- Repaired responsive intrinsic sizing at the responsible grid/flex/data
+  surfaces; no global `overflow-x: hidden` or weakened assertion was added.
+- Retained diagnostic detail in the Playwright failure message so future
+  regressions report root and offender geometry instead of only a pixel count.
 
 ## External actions
 
-No push, merge, pull request, issue, release, deployment, package publication,
-webhook registration, paid model call, purchase, telemetry egress, live
-integration mutation, or Docker cleanup/restart was performed. GitHub access
-was read-only. The only staged path before the final gate was the generated
-schema required by the repository's drift comparison; the coherent local
-tranche was committed only after this evidence and backlog were synchronized.
+The branch was pushed, pull request #23 was opened, and corrective commits were
+published to obtain exact-SHA hosted verification. At the time this evidence
+update was authored, merge and branch deletion remained intentionally pending
+until the documentation commit itself completed CI.
+
+No release, deployment, package publication, webhook registration, paid model
+call, purchase, telemetry egress, billing mutation, live provider integration,
+or destructive Docker operation was performed.
 
 ## Result
 
-Block B is complete for the available environment: all canonical non-Docker
-gates pass, the inherited P0 behavior is repaired, contracts and current docs
-match reality, and Docker-dependent proof is narrowly marked BLOCKED. Ants is
-still not production-ready: model-driven Captain/Builder/Reviewer behavior,
-RLM, security-grade sandboxing, membership/authorization, hosted SCM, and the
-other backlog capabilities remain future vertical work.
+Block B is green at the branch boundary: inherited P0 behavior is repaired,
+contracts and current documentation match the implementation, and all four
+hosted jobs pass on the exact verified code SHA. This evidence update must also
+pass CI before merge; the eventual merge and post-merge `main` verification are
+separate delivery facts.
+
+Ants is still not production-ready: model-driven Captain/Builder/Reviewer
+behavior, RLM, security-grade sandboxing, membership/authorization, hosted SCM,
+and the other backlog capabilities remain future vertical work.
