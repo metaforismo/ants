@@ -183,8 +183,10 @@ p {
 
 .shell {
   display: grid;
-  grid-template-columns: var(--rail-width) 1fr;
+  grid-template-columns: var(--rail-width) minmax(0, 1fr);
+  min-width: 0;
   min-height: 100vh;
+  width: 100%;
 }
 
 .rail {
@@ -194,6 +196,7 @@ p {
   display: flex;
   flex-direction: column;
   gap: 16px;
+  min-width: 0;
 }
 
 .rail-brand {
@@ -203,6 +206,44 @@ p {
   display: flex;
   align-items: center;
   gap: 8px;
+}
+
+.rail-nav {
+  flex: 1;
+  min-width: 0;
+}
+
+.rail-nav-link {
+  font-weight: 550;
+  text-decoration: none;
+}
+
+.rail-identity {
+  min-width: 0;
+  font-size: 12px;
+}
+
+.rail-tenant-label,
+.rail-user {
+  color: var(--ink-3);
+}
+
+.rail-tenant,
+.rail-user {
+  display: block;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.rail-user {
+  margin-top: 6px;
+}
+
+.rail-signout {
+  display: block;
+  margin-top: 8px;
 }
 
 .main {
@@ -396,7 +437,50 @@ p {
   background: #eef4fd;
 }
 
+.banner-info {
+  border-color: var(--accent);
+  color: var(--accent);
+  background: var(--accent-wash);
+}
+
 /* ---- conversation / workspace ---- */
+
+.run-list {
+  max-height: 340px;
+  overflow-y: auto;
+}
+
+.run-row {
+  display: grid;
+  grid-template-columns: auto auto minmax(0, 1fr) minmax(0, auto);
+  gap: 4px 12px;
+  align-items: center;
+  width: 100%;
+  font: inherit;
+  text-align: left;
+  background: none;
+  border: 0;
+  border-top: 1px solid var(--surface-sunken);
+  padding: 8px 6px;
+  cursor: pointer;
+}
+
+.run-row:hover {
+  background: var(--accent-wash);
+}
+
+.run-row[aria-current="true"] {
+  background: var(--accent-wash);
+  box-shadow: inset 2px 0 0 var(--accent);
+}
+
+.run-row-id {
+  color: var(--ink-3);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  justify-self: end;
+}
 
 .message {
   border: 1px solid var(--hairline);
@@ -483,16 +567,59 @@ p {
 
 @media (max-width: 800px) {
   .shell {
-    grid-template-columns: 1fr;
+    grid-template-columns: minmax(0, 1fr);
   }
 
   .rail {
     flex-direction: row;
     align-items: center;
-    justify-content: space-between;
+    justify-content: flex-start;
+    flex-wrap: wrap;
+    column-gap: 16px;
+    row-gap: 8px;
     border-right: 0;
     border-bottom: 1px solid var(--hairline);
     padding: 12px 16px;
+  }
+
+  .rail > * {
+    min-width: 0;
+  }
+
+  .rail-brand {
+    flex: none;
+  }
+
+  .rail-nav {
+    flex: 1 1 auto;
+  }
+
+  .rail-identity {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    flex: 1 0 100%;
+    width: 100%;
+  }
+
+  .rail-tenant-label,
+  .rail-signout {
+    flex: none;
+  }
+
+  .rail-tenant {
+    flex: 0 1 120px;
+    max-width: 30vw;
+  }
+
+  .rail-user {
+    flex: 1 1 80px;
+    margin-top: 0;
+  }
+
+  .rail-signout {
+    margin-top: 0;
+    margin-left: auto;
   }
 
   .main {
@@ -504,6 +631,16 @@ p {
   }
 
   .row-updated {
+    display: none;
+  }
+
+  /* Compact navigator rows: seq, status, and time survive; the run id is
+     one selection away in the panel header instead of crowding 360px. */
+  .run-row {
+    grid-template-columns: auto auto minmax(0, 1fr);
+  }
+
+  .run-row-id {
     display: none;
   }
 }

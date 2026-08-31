@@ -26,21 +26,29 @@ export function AppShell({
           </svg>
           Ants
         </Link>
-        <div style={{ flex: 1 }}>
-          <Link href="/threads" style={{ textDecoration: "none", fontWeight: 550 }}>
+        <div className="rail-nav">
+          <Link href="/threads" className="rail-nav-link">
             Threads
           </Link>
         </div>
-        <div style={{ fontSize: 12 }}>
-          <div style={{ color: "var(--ink-3)" }}>tenant</div>
-          <div className="mono">{tenantSlug}</div>
-          <div style={{ color: "var(--ink-3)", marginTop: 6 }}>{username}</div>
-          <div style={{ marginTop: 8 }}>
+        <div className="rail-identity">
+          <span className="rail-tenant-label">tenant</span>
+          <span className="rail-tenant mono" title={tenantSlug}>
+            {tenantSlug}
+          </span>
+          <span className="rail-user" title={username}>
+            {username}
+          </span>
+          <span className="rail-signout">
             <SignOutButton />
-          </div>
+          </span>
         </div>
       </nav>
-      <main id="main" className="main">
+      <main
+        id="main"
+        className="main"
+        style={{ width: "100%", maxWidth: "100%" }}
+      >
         {children}
       </main>
     </div>

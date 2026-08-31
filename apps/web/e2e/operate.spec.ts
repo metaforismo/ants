@@ -57,5 +57,84 @@ test.describe("operate journey", () => {
     await expect(report.getByText("Verification")).toBeVisible();
     await expect(report.locator(".evidence-table tbody tr").first()).toBeVisible();
     await expect(report.getByText(/passed|failed/).first()).toBeVisible();
+
+    // The real run-history component remains operable at the narrow layout:
+    // the exact id moves to the selected panel and the document never overflows.
+    await page.setViewportSize({ width: 390, height: 844 });
+    const history = page.getByTestId("run-history");
+    await expect(history).toBeVisible();
+    await expect(history.locator(".run-row-id")).toBeHidden();
+
+    const layout = await page.evaluate(() => {
+      const viewportWidth = document.documentElement.clientWidth;
+      const describe = (name: string, element: HTMLElement | null) => {
+        if (!element) return { name, missing: true };
+        const rect = element.getBoundingClientRect();
+        const style = getComputedStyle(element);
+        return {
+          name,
+          missing: false,
+          tag: element.tagName.toLowerCase(),
+          id: element.id,
+          className: typeof element.className === "string" ? element.className : "",
+          left: Math.round(rect.left * 10) / 10,
+          right: Math.round(rect.right * 10) / 10,
+          width: Math.round(rect.width * 10) / 10,
+          clientWidth: element.clientWidth,
+          scrollWidth: element.scrollWidth,
+          display: style.display,
+          position: style.position,
+          boxSizing: style.boxSizing,
+          computedWidth: style.width,
+          minWidth: style.minWidth,
+          maxWidth: style.maxWidth,
+          paddingLeft: style.paddingLeft,
+          paddingRight: style.paddingRight,
+          overflowX: style.overflowX,
+          whiteSpace: style.whiteSpace,
+          gridTemplateColumns: style.gridTemplateColumns,
+          flexBasis: style.flexBasis,
+          text: (element.textContent ?? "").trim().replace(/\s+/g, " ").slice(0, 80),
+        };
+      };
+      const offenders = Array.from(document.body.querySelectorAll<HTMLElement>("*"))
+        .map((element) => describe("offender", element))
+        .filter(
+          (entry) =>
+            !entry.missing &&
+            ((entry.left ?? 0) < -1 || (entry.right ?? 0) > viewportWidth + 1),
+        )
+        .sort((left, right) => (right.right ?? 0) - (left.right ?? 0))
+        .slice(0, 12);
+      const roots = [
+        describe("html", document.documentElement),
+        describe("body", document.body),
+        describe("shell", document.querySelector<HTMLElement>(".shell")),
+        describe("rail", document.querySelector<HTMLElement>(".rail")),
+        describe("main", document.querySelector<HTMLElement>("#main")),
+        describe("workspace", document.querySelector<HTMLElement>("#main > div")),
+        describe("conversation", document.querySelector<HTMLElement>('[aria-label="Conversation"]')),
+        describe("composer", document.querySelector<HTMLElement>(".composer")),
+        describe("composer-field", document.querySelector<HTMLElement>(".composer > div")),
+        describe("composer-input", document.querySelector<HTMLElement>("#composer-input")),
+        describe(
+          "evidence-scroll",
+          document.querySelector<HTMLElement>('[data-testid="verification-evidence-scroll"]'),
+        ),
+        describe("evidence-table", document.querySelector<HTMLElement>(".evidence-table")),
+      ];
+
+      return {
+        overflow: document.documentElement.scrollWidth - viewportWidth,
+        viewportWidth,
+        roots,
+        offenders,
+      };
+    });
+
+    expect(
+      layout.overflow,
+      `horizontal overflow roots=${JSON.stringify(layout.roots)} offenders=${JSON.stringify(layout.offenders)}`,
+    ).toBeLessThanOrEqual(1);
   });
 });

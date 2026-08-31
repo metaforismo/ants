@@ -58,9 +58,9 @@ type App struct {
 	Ready func(ctx context.Context) error
 }
 
-// Build wires every component from cfg. Store mode postgres is rejected with
-// an explicit error until that adapter ships (ADR-0009); nothing falls back
-// silently to memory.
+// Build wires every component from cfg. Memory and PostgreSQL are explicit
+// store modes; an unsupported mode or PostgreSQL connection failure is
+// returned to the caller and never falls back silently to memory (ADR-0009).
 func Build(cfg config.Config, logOut io.Writer) (*App, error) {
 	logger := newLogger(cfg.Log, logOut)
 

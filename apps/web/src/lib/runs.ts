@@ -16,6 +16,27 @@ export function latestRun(runs: Run[]): Run | undefined {
 }
 
 /**
+ * Which run the workspace displays, resolved from server truth alone.
+ *
+ * `pinnedRunId` is the operator's explicit selection ("open this exact
+ * run"); undefined means follow-latest: the newest run is selected
+ * automatically, including one just discovered by polling. A pin never
+ * moves on its own — a newer run discovered while the operator reads a
+ * historical run changes nothing but the "newer runs available" notice.
+ * The one fallback is deliberate and documented: if the pinned id is no
+ * longer part of server truth (unreachable while the run-history contract
+ * is append-only; retention deletion would change that) selection resets
+ * to the newest run rather than pointing at a ghost.
+ */
+export function resolveSelectedRun(runs: Run[], pinnedRunId?: string): Run | undefined {
+  if (pinnedRunId !== undefined) {
+    const pinned = runs.find((run) => run.id === pinnedRunId);
+    if (pinned) return pinned;
+  }
+  return latestRun(runs);
+}
+
+/**
  * Why a history traversal refused to continue. Every variant names a
  * violated invariant of the keyset oldest-first pagination contract, never
  * a transient network condition (those surface as ApiClientError).

@@ -6,10 +6,15 @@ Like an ant colony, specialized agents divide work, operate independently, share
 
 ## Status
 
-Two tranches are implemented and green. The deterministic vertical slice runs
-end to end — request → plan/spec → isolated parallel tasks → integration →
-tests → evidence-based report — with real git commits and really executed
-verification commands. On top of it, execution is durable: state transitions,
+Ants has an implemented foundation, not a completed agent product. Tranches 1
+and 2 plus the incremental 3.x work implement the deterministic vertical slice
+and operational layers described below; the current proof boundary is recorded
+in the latest evidence file. The slice runs end to end — request → plan/spec →
+isolated parallel tasks → integration → tests → evidence-based report — with
+real local Git commits and executed verification commands. Its Planner and
+Reviewer are deterministic implementations for canonical local tests, not yet
+model-driven Captain/Reviewer agents or an RLM runtime. On top of the slice,
+execution is durable: state transitions,
 events, and their deliveries commit atomically (unit of work + transactional
 outbox), runs are dispatched through tenant-scoped run claims with fencing and
 bounded retries by a process-level worker, and the server exposes honest
@@ -74,7 +79,7 @@ unchanged. Loading, empty, error, unauthorized, expired-session,
 rate-limited, and uniform not-available states are all designed (DESIGN.md);
 status is never color alone.
 
-Read the [master plan](docs/MASTER_PLAN.md) for the complete product and implementation strategy. The condensed [resources index](docs/RESOURCES.md) links directly to the repositories, documentation, papers, and product research that accelerate development. Architecture decisions live in [docs/adr](docs/adr); the current implementation state and its proof matrix live in [docs/TRANCHE_3_8_EVIDENCE.md](docs/TRANCHE_3_8_EVIDENCE.md), with per-tranche records alongside (latest: [Tranche 3.8 thread run history end to end](docs/TRANCHE_3_8_EVIDENCE.md)).
+Read the [master plan](docs/MASTER_PLAN.md) for the target product and implementation strategy; its decision ledger distinguishes confirmed intent, implemented facts, recommendations, and open choices. The condensed [resources index](docs/RESOURCES.md) links directly to primary repositories, documentation, papers, and product research. Architecture decisions live in [docs/adr](docs/adr); the current implementation matrix lives in the [implementation backlog](docs/IMPLEMENTATION_BACKLOG.md), and exact executed proof lives in [Tranche 3.9 evidence](docs/TRANCHE_3_9_EVIDENCE.md), with historical per-tranche records alongside.
 
 ## Quick start
 
@@ -156,13 +161,17 @@ The API is specified by [openapi/v1/openapi.yaml](openapi/v1/openapi.yaml); Type
 | `db/migrations` | PostgreSQL schema (embedded, forward-only) |
 | `packages/contracts` | Generated TypeScript API types |
 
-## Intended stack
+## Current stack and evaluated directions
 
-- Go for the control plane, scheduler, node daemon, sandbox lifecycle, and CLI.
-- TypeScript and Next.js for the responsive web/PWA experience.
-- Expo/React Native for future native mobile clients.
-- Firecracker/KVM on Linux and Virtualization.framework/vfkit on Apple Silicon.
-- PostgreSQL, Temporal, Keycloak, OpenFGA, OpenTelemetry, and S3-compatible storage.
+- Implemented: Go backend/CLI; TypeScript, Next.js, and React web console;
+  PostgreSQL and memory stores; OIDC/Keycloak integration; OpenAPI contracts.
+- Implemented with an explicit safety limit: process/fake sandbox drivers and
+  memory/local-Git SCM. The process driver is not a security boundary.
+- Candidates, not selected or complete production systems: Expo/React Native,
+  Firecracker/KVM, Virtualization.framework/vfkit, Temporal, OpenFGA,
+  OpenTelemetry backends, S3-compatible storage, Kubernetes, and Stripe.
+- See the master-plan decision ledger and implementation backlog before treating
+  any candidate as architecture or an available capability.
 
 ## License
 

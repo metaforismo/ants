@@ -41,7 +41,7 @@ export function Composer({
         void send();
       }}
     >
-      <div style={{ flex: 1 }}>
+      <div style={{ flex: "1 1 0", minWidth: 0 }}>
         <label className="label" htmlFor="composer-input" style={{ position: "absolute", left: -9999 }}>
           Add a message
         </label>

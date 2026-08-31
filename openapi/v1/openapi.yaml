@@ -203,6 +203,8 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/Thread"
+        "400":
+          $ref: "#/components/responses/Problem"
         "401":
           $ref: "#/components/responses/Problem"
         "404":
@@ -250,6 +252,8 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/MessagePage"
+        "400":
+          $ref: "#/components/responses/Problem"
         "401":
           $ref: "#/components/responses/Problem"
         "404":
@@ -288,6 +292,8 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/RunPage"
+        "400":
+          $ref: "#/components/responses/Problem"
         "401":
           $ref: "#/components/responses/Problem"
         "404":
@@ -336,6 +342,8 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/RunWithTasks"
+        "400":
+          $ref: "#/components/responses/Problem"
         "401":
           $ref: "#/components/responses/Problem"
         "404":
@@ -357,6 +365,8 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/EventPage"
+        "400":
+          $ref: "#/components/responses/Problem"
         "401":
           $ref: "#/components/responses/Problem"
         "404":
@@ -381,6 +391,8 @@ paths:
                   status:
                     type: string
                 required: [status]
+        "400":
+          $ref: "#/components/responses/Problem"
         "401":
           $ref: "#/components/responses/Problem"
         "404":
@@ -403,6 +415,8 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/RunReport"
+        "400":
+          $ref: "#/components/responses/Problem"
         "401":
           $ref: "#/components/responses/Problem"
         "404":
@@ -425,6 +439,8 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/Task"
+        "400":
+          $ref: "#/components/responses/Problem"
         "401":
           $ref: "#/components/responses/Problem"
         "404":
@@ -456,6 +472,8 @@ paths:
               schema: { type: string }
             text/plain:
               schema: { type: string }
+        "400":
+          $ref: "#/components/responses/Problem"
         "401":
           $ref: "#/components/responses/Problem"
         "404":

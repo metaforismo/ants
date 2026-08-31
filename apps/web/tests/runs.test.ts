@@ -6,6 +6,7 @@ import type { Run } from "@ants/contracts";
 import {
   collectRunHistory,
   latestRun,
+  resolveSelectedRun,
 } from "@/lib/runs";
 
 function run(id: string, seq: number, createdAt = "2026-01-01T00:00:00Z"): Run {
@@ -202,5 +203,31 @@ describe("collectRunHistory", () => {
     await expect(
       collectRunHistory(fetchPage, { maxPages: 5 }),
     ).rejects.toMatchObject({ code: "unbounded_traversal" });
+  });
+});
+
+describe("resolveSelectedRun", () => {
+  const history = [run("r1", 1), run("r2", 2), run("r3", 3)];
+
+  it("follows the newest run when the operator has not selected history", () => {
+    expect(resolveSelectedRun(history)?.id).toBe("r3");
+    expect(resolveSelectedRun([], undefined)).toBeUndefined();
+  });
+
+  it("keeps an explicit historical selection pinned while a newer run is discovered", () => {
+    // Polling appended r3 after the operator pinned r2: the pin must not move.
+    expect(resolveSelectedRun(history, "r2")?.id).toBe("r2");
+  });
+
+  it("pins the newest run exactly instead of silently switching to follow mode", () => {
+    // Pinning the current latest, then a newer run appearing, leaves the
+    // original pin selected — same rule as any historical run.
+    expect(resolveSelectedRun([...history, run("r4", 4)], "r3")?.id).toBe("r3");
+  });
+
+  it("resets to the newest run when the pinned id left server truth", () => {
+    // Unreachable under today's append-only contract; guards against a
+    // future retention change pointing the panel at a ghost.
+    expect(resolveSelectedRun(history, "rx")?.id).toBe("r3");
   });
 });

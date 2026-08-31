@@ -65,9 +65,29 @@ export function RunPanel({ runId }: { runId: string }) {
           marginBottom: 12,
         }}
       >
-        <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+        <div
+          style={{
+            display: "grid",
+            gridTemplateColumns: "auto minmax(0, 1fr) auto",
+            alignItems: "center",
+            gap: 10,
+            minWidth: 0,
+            flex: "1 1 280px",
+          }}
+        >
           <h2 style={{ margin: 0 }}>Run</h2>
-          <span className="mono" style={{ color: "var(--ink-3)", fontSize: 12 }}>
+          <span
+            className="mono"
+            title={runId}
+            style={{
+              color: "var(--ink-3)",
+              fontSize: 12,
+              minWidth: 0,
+              overflow: "hidden",
+              textOverflow: "ellipsis",
+              whiteSpace: "nowrap",
+            }}
+          >
             {runId}
           </span>
           {run ? (

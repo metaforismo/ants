@@ -227,6 +227,15 @@ func TestAuthEnforcement(t *testing.T) {
 	if code := problem(raw); code != "missing_bearer_token" {
 		t.Fatalf("missing credential must be typed missing_bearer_token, got %s", code)
 	}
+	// Authentication precedes path parsing: malformed resource syntax cannot
+	// be used to distinguish the route contract without valid credentials.
+	status, _, raw = e.do(http.MethodGet, "/v1/threads/not-an-id", map[string]string{}, "")
+	if status != http.StatusUnauthorized {
+		t.Fatalf("unauthenticated malformed path must be 401, got %d (%s)", status, raw)
+	}
+	if code := problem(raw); code != "missing_bearer_token" {
+		t.Fatalf("authentication must win over malformed id, got %s", code)
+	}
 	// Unknown tenant inside an otherwise well-formed credential.
 	status, _, _ = e.do(http.MethodGet, "/v1/projects", e.headers("nope-nope-nope"), "")
 	if status != http.StatusUnauthorized {
@@ -292,7 +301,6 @@ func TestCrossTenantIsolation(t *testing.T) {
 
 	// Tenant B must not see any A resource: uniform 404 everywhere.
 	for name, path := range map[string]string{
-		"project":    "/v1/projects/" + projectA,
 		"thread":     "/v1/threads/" + threadA,
 		"run":        "/v1/runs/" + runA,
 		"messages":   "/v1/threads/" + threadA + "/messages",
@@ -303,6 +311,35 @@ func TestCrossTenantIsolation(t *testing.T) {
 		status, _, raw := e.do(http.MethodGet, path, e.headers(e.tenantBS), "")
 		if status != http.StatusNotFound {
 			t.Errorf("%s: cross-tenant read gave %d, want uniform 404 (%s)", name, status, truncate(raw))
+		}
+	}
+
+	// The project boundary is a request-body reference, not a GET route.
+	// Foreign references and mutations use the same uniform 404 posture.
+	for name, request := range map[string]struct {
+		method string
+		path   string
+		body   string
+	}{
+		"project reference": {
+			method: http.MethodPost,
+			path:   "/v1/threads",
+			body:   fmt.Sprintf(`{"project_id":%q,"title":"foreign"}`, projectA),
+		},
+		"append message": {
+			method: http.MethodPost,
+			path:   "/v1/threads/" + threadA + "/messages",
+			body:   `{"content":"foreign"}`,
+		},
+		"cancel run": {
+			method: http.MethodPost,
+			path:   "/v1/runs/" + runA + "/cancel",
+			body:   "",
+		},
+	} {
+		status, _, raw := e.do(request.method, request.path, e.headers(e.tenantBS), request.body)
+		if status != http.StatusNotFound {
+			t.Errorf("%s: cross-tenant mutation gave %d, want uniform 404 (%s)", name, status, truncate(raw))
 		}
 	}
 
@@ -633,6 +670,103 @@ func TestListThreadRuns(t *testing.T) {
 	}
 	if err := json.Unmarshal(raw, &problem); err != nil || problem.Code == "" {
 		t.Fatalf("not-found must be a problem document: %s", raw)
+	}
+}
+
+// TestMalformedPathIDsAreTypedInvalidRequests pins the error-taxonomy
+// contract across every /v1 route carrying an {id} path parameter: an
+// identifier that fails its grammar is a client fault and must answer a
+// typed 400 problem (kind invalid, stable code invalid_id), never the
+// wrapped-internal 500 the handlers produced before parse failures became
+// taxonomy-typed. A well-formed but unknown identifier stays uniform 404,
+// asserted alongside as the contrast case.
+func TestMalformedPathIDsAreTypedInvalidRequests(t *testing.T) {
+	e := newEnv(t)
+	e.seedProjectThread(e.tenantAS)
+
+	malformed := "not-an-id"
+	endpoints := []struct {
+		name   string
+		method string
+		path   string
+	}{
+		{"get thread", http.MethodGet, "/v1/threads/" + malformed},
+		{"append message", http.MethodPost, "/v1/threads/" + malformed + "/messages"},
+		{"list messages", http.MethodGet, "/v1/threads/" + malformed + "/messages"},
+		{"list runs", http.MethodGet, "/v1/threads/" + malformed + "/runs"},
+		{"start run", http.MethodPost, "/v1/threads/" + malformed + "/runs"},
+		{"get run", http.MethodGet, "/v1/runs/" + malformed},
+		{"run events", http.MethodGet, "/v1/runs/" + malformed + "/events"},
+		{"cancel run", http.MethodPost, "/v1/runs/" + malformed + "/cancel"},
+		{"run report", http.MethodGet, "/v1/runs/" + malformed + "/report"},
+		{"get task", http.MethodGet, "/v1/tasks/" + malformed},
+		{"get artifact", http.MethodGet, "/v1/artifacts/" + malformed},
+	}
+	for _, tc := range endpoints {
+		status, _, raw := e.do(tc.method, tc.path, e.headers(e.tenantAS), "")
+		if status != http.StatusBadRequest {
+			t.Errorf("%s: malformed id must be 400, got %d (%s)", tc.name, status, truncate(raw))
+			continue
+		}
+		var problem struct {
+			Type string `json:"type"`
+			Code string `json:"code"`
+		}
+		if err := json.Unmarshal(raw, &problem); err != nil {
+			t.Errorf("%s: rejection must be a problem document: %s", tc.name, raw)
+			continue
+		}
+		if problem.Code != domain.CodeInvalidID || problem.Type != domain.ProblemInvalid {
+			t.Errorf("%s: rejection must be typed %s/%s, got %s/%s (%s)",
+				tc.name, domain.ProblemInvalid, domain.CodeInvalidID, problem.Type, problem.Code, raw)
+		}
+	}
+
+	// Contrast: grammar-valid but unknown identifiers keep the uniform
+	// not-found posture (ADR-0004); the 400 above is strictly about syntax.
+	missing := "thr_" + strings.Repeat("missing", 4)
+	status, _, _ := e.do(http.MethodGet, "/v1/threads/"+missing+"/runs", e.headers(e.tenantAS), "")
+	if status != http.StatusNotFound {
+		t.Fatalf("unknown-but-valid thread id must stay uniform 404, got %d", status)
+	}
+}
+
+func TestCreateThreadProjectIDBoundary(t *testing.T) {
+	e := newEnv(t)
+	projectA, _ := e.seedProjectThread(e.tenantAS)
+
+	cases := []struct {
+		name       string
+		tenantSlug string
+		projectID  string
+		wantStatus int
+		wantCode   string
+	}{
+		{"malformed", e.tenantAS, "not-an-id", http.StatusBadRequest, domain.CodeInvalidID},
+		{"valid missing", e.tenantAS, "prj_" + strings.Repeat("missing", 4), http.StatusNotFound, ""},
+		{"foreign tenant", e.tenantBS, projectA, http.StatusNotFound, ""},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			body := fmt.Sprintf(`{"project_id":%q,"title":"boundary"}`, tc.projectID)
+			status, _, raw := e.do(http.MethodPost, "/v1/threads", e.headers(tc.tenantSlug), body)
+			if status != tc.wantStatus {
+				t.Fatalf("status %d, want %d (%s)", status, tc.wantStatus, raw)
+			}
+			if tc.wantCode == "" {
+				return
+			}
+			var problem struct {
+				Type string `json:"type"`
+				Code string `json:"code"`
+			}
+			if err := json.Unmarshal(raw, &problem); err != nil {
+				t.Fatalf("rejection must be a problem document: %s", raw)
+			}
+			if problem.Type != domain.ProblemInvalid || problem.Code != tc.wantCode {
+				t.Fatalf("problem = %s/%s, want %s/%s", problem.Type, problem.Code, domain.ProblemInvalid, tc.wantCode)
+			}
+		})
 	}
 }
 
