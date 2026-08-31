@@ -80,28 +80,36 @@ export function ReportView({ runId }: { runId: string }) {
         {evidence.length === 0 ? (
           <p style={{ color: "var(--ink-2)" }}>No verification evidence recorded.</p>
         ) : (
-          <table className="evidence-table">
-            <thead>
-              <tr>
-                <th scope="col">Criterion</th>
-                <th scope="col">Command</th>
-                <th scope="col">Exit</th>
-                <th scope="col">Result</th>
-              </tr>
-            </thead>
-            <tbody>
-              {evidence.map((row) => (
-                <tr key={`${row.criterion}-${row.at}`}>
-                  <td>{row.criterion}</td>
-                  <td className="mono">{row.command.join(" ")}</td>
-                  <td className="mono">{row.exit_code}</td>
-                  <td className={`pass-${row.passed ? "true" : "false"}`}>
-                    {row.passed ? "passed" : "failed"}
-                  </td>
+          <div
+            role="region"
+            aria-label="Verification evidence"
+            tabIndex={0}
+            data-testid="verification-evidence-scroll"
+            style={{ minWidth: 0, maxWidth: "100%", overflowX: "auto", overscrollBehaviorX: "contain" }}
+          >
+            <table className="evidence-table">
+              <thead>
+                <tr>
+                  <th scope="col">Criterion</th>
+                  <th scope="col">Command</th>
+                  <th scope="col">Exit</th>
+                  <th scope="col">Result</th>
                 </tr>
-              ))}
-            </tbody>
-          </table>
+              </thead>
+              <tbody>
+                {evidence.map((row) => (
+                  <tr key={`${row.criterion}-${row.at}`}>
+                    <td>{row.criterion}</td>
+                    <td className="mono">{row.command.join(" ")}</td>
+                    <td className="mono">{row.exit_code}</td>
+                    <td className={`pass-${row.passed ? "true" : "false"}`}>
+                      {row.passed ? "passed" : "failed"}
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
         )}
       </section>
 
