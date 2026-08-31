@@ -67,48 +67,72 @@ test.describe("operate journey", () => {
 
     const layout = await page.evaluate(() => {
       const viewportWidth = document.documentElement.clientWidth;
+      const describe = (name: string, element: HTMLElement | null) => {
+        if (!element) return { name, missing: true };
+        const rect = element.getBoundingClientRect();
+        const style = getComputedStyle(element);
+        return {
+          name,
+          tag: element.tagName.toLowerCase(),
+          id: element.id,
+          className: typeof element.className === "string" ? element.className : "",
+          left: Math.round(rect.left * 10) / 10,
+          right: Math.round(rect.right * 10) / 10,
+          width: Math.round(rect.width * 10) / 10,
+          clientWidth: element.clientWidth,
+          scrollWidth: element.scrollWidth,
+          display: style.display,
+          position: style.position,
+          boxSizing: style.boxSizing,
+          computedWidth: style.width,
+          minWidth: style.minWidth,
+          maxWidth: style.maxWidth,
+          paddingLeft: style.paddingLeft,
+          paddingRight: style.paddingRight,
+          overflowX: style.overflowX,
+          whiteSpace: style.whiteSpace,
+          gridTemplateColumns: style.gridTemplateColumns,
+          flexBasis: style.flexBasis,
+          text: (element.textContent ?? "").trim().replace(/\s+/g, " ").slice(0, 80),
+        };
+      };
       const offenders = Array.from(document.body.querySelectorAll<HTMLElement>("*"))
-        .map((element) => {
-          const rect = element.getBoundingClientRect();
-          const style = getComputedStyle(element);
-          return {
-            tag: element.tagName.toLowerCase(),
-            id: element.id,
-            className: typeof element.className === "string" ? element.className : "",
-            left: Math.round(rect.left * 10) / 10,
-            right: Math.round(rect.right * 10) / 10,
-            width: Math.round(rect.width * 10) / 10,
-            clientWidth: element.clientWidth,
-            scrollWidth: element.scrollWidth,
-            display: style.display,
-            position: style.position,
-            boxSizing: style.boxSizing,
-            computedWidth: style.width,
-            minWidth: style.minWidth,
-            maxWidth: style.maxWidth,
-            paddingLeft: style.paddingLeft,
-            paddingRight: style.paddingRight,
-            overflowX: style.overflowX,
-            whiteSpace: style.whiteSpace,
-            gridTemplateColumns: style.gridTemplateColumns,
-            flexBasis: style.flexBasis,
-            text: (element.textContent ?? "").trim().replace(/\s+/g, " ").slice(0, 80),
-          };
-        })
-        .filter(({ left, right }) => left < -1 || right > viewportWidth + 1)
+        .map((element) => describe("offender", element))
+        .filter(
+          (entry): entry is Exclude<typeof entry, { missing: true }> =>
+            !("missing" in entry) && (entry.left < -1 || entry.right > viewportWidth + 1),
+        )
         .sort((left, right) => right.right - left.right)
         .slice(0, 12);
+      const roots = [
+        describe("html", document.documentElement),
+        describe("body", document.body),
+        describe("shell", document.querySelector<HTMLElement>(".shell")),
+        describe("rail", document.querySelector<HTMLElement>(".rail")),
+        describe("main", document.querySelector<HTMLElement>("#main")),
+        describe("workspace", document.querySelector<HTMLElement>("#main > div")),
+        describe("conversation", document.querySelector<HTMLElement>('[aria-label="Conversation"]')),
+        describe("composer", document.querySelector<HTMLElement>(".composer")),
+        describe("composer-field", document.querySelector<HTMLElement>(".composer > div")),
+        describe("composer-input", document.querySelector<HTMLElement>("#composer-input")),
+        describe(
+          "evidence-scroll",
+          document.querySelector<HTMLElement>('[data-testid="verification-evidence-scroll"]'),
+        ),
+        describe("evidence-table", document.querySelector<HTMLElement>(".evidence-table")),
+      ];
 
       return {
         overflow: document.documentElement.scrollWidth - viewportWidth,
         viewportWidth,
+        roots,
         offenders,
       };
     });
 
     expect(
       layout.overflow,
-      `horizontal overflow offenders: ${JSON.stringify(layout.offenders)}`,
+      `horizontal overflow roots=${JSON.stringify(layout.roots)} offenders=${JSON.stringify(layout.offenders)}`,
     ).toBeLessThanOrEqual(1);
   });
 });
