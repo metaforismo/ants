@@ -10,6 +10,7 @@ import (
 	"strings"
 
 	"github.com/metaforismo/ants/internal/domain"
+	"github.com/metaforismo/ants/internal/planner"
 	"github.com/metaforismo/ants/internal/sandbox"
 )
 
@@ -124,30 +125,30 @@ func (e *Engine) materialize(_ context.Context, ws *workspace, files map[string]
 		return nil
 	}
 	paths := make([]string, 0, len(files))
-	for p := range files {
-		paths = append(paths, p)
+	for filePath := range files {
+		paths = append(paths, filePath)
 	}
 	sort.Strings(paths)
-	for _, p := range paths {
-		if !containedRelPath(p) {
-			return domain.Invalidf("workspace_path", "file path %q is not contained", p)
+	for _, filePath := range paths {
+		if !containedRelPath(filePath) {
+			return domain.Invalidf("workspace_path", "file path %q is not contained", filePath)
 		}
-		target := filepath.Join(ws.root, filepath.FromSlash(p))
+		target := filepath.Join(ws.root, filepath.FromSlash(filePath))
 		if err := os.MkdirAll(filepath.Dir(target), 0o700); err != nil {
-			return fmt.Errorf("materialize %s: %w", p, err)
+			return fmt.Errorf("materialize %s: %w", filePath, err)
 		}
-		if err := os.WriteFile(target, files[p], 0o600); err != nil {
-			return fmt.Errorf("materialize %s: %w", p, err)
+		if err := os.WriteFile(target, files[filePath], 0o600); err != nil {
+			return fmt.Errorf("materialize %s: %w", filePath, err)
 		}
 	}
 	return nil
 }
 
-func containedRelPath(p string) bool {
-	if p == "" || strings.HasPrefix(p, "/") || strings.Contains(p, "..") || strings.Contains(p, "\\") {
+func containedRelPath(filePath string) bool {
+	if filePath == "" || strings.HasPrefix(filePath, "/") || strings.Contains(filePath, "..") || strings.Contains(filePath, "\\") {
 		return false
 	}
-	cleaned := filepath.ToSlash(filepath.Clean(p))
+	cleaned := filepath.ToSlash(filepath.Clean(filePath))
 	return cleaned == "." || (!strings.HasPrefix(cleaned, "../") && cleaned != "..")
 }
 
@@ -156,23 +157,23 @@ func containedRelPath(p string) bool {
 // attempt records its own evidence.
 func (e *Engine) execWithRetries(ctx context.Context, st *runState, ws *workspace, cmd []string, criterion string) (domain.Evidence, error) {
 	for attempt := 1; ; attempt++ {
-		ev, err := e.execVerified(ctx, st, nil, ws, cmd, criterion)
+		evidence, err := e.execVerified(ctx, st, nil, ws, cmd, criterion)
 		switch {
 		case err == nil:
-			return ev, nil
+			return evidence, nil
 		case isCancellation(err):
-			return ev, err
+			return evidence, err
 		case domain.IsRetryable(err) && attempt < e.cfg.MaxAttempts:
 			if sleepErr := e.deps.Sleeper.Sleep(ctx, e.cfg.RetryBackoff<<uint(attempt-1)); sleepErr != nil || ctx.Err() != nil {
-				return ev, &domain.Error{Kind: domain.ErrKindCancelled, Code: "run_cancelled", Message: "cancelled during verification backoff", Cause: ctx.Err()}
+				return evidence, &domain.Error{Kind: domain.ErrKindCancelled, Code: "run_cancelled", Message: "cancelled during verification backoff", Cause: ctx.Err()}
 			}
 		default:
 			if err != nil && domain.ErrKindOf(err) != domain.ErrKindCancelled {
 				// Terminal execution error: surface as failed evidence.
-				ev.Passed = false
-				return ev, nil
+				evidence.Passed = false
+				return evidence, nil
 			}
-			return ev, err
+			return evidence, err
 		}
 	}
 }
@@ -180,16 +181,16 @@ func (e *Engine) execWithRetries(ctx context.Context, st *runState, ws *workspac
 // execVerified runs one command in a workspace under policy + budget control
 // and records its output as evidence with a log artifact.
 func (e *Engine) execVerified(ctx context.Context, st *runState, task *domain.Task, ws *workspace, cmd []string, criterion string) (domain.Evidence, error) {
-	ev := domain.Evidence{Criterion: criterion, Command: append([]string(nil), cmd...)}
+	evidence := domain.Evidence{Criterion: criterion, Command: append([]string(nil), cmd...)}
 	if criterion == "" {
-		ev.Criterion = strings.Join(cmd, " ")
+		evidence.Criterion = strings.Join(cmd, " ")
 	}
 
-	if err := e.authorize(ctx, st, task, domain.ActionSandboxExec, ev.Criterion); err != nil {
-		return ev, err
+	if err := e.authorize(ctx, st, task, domain.ActionSandboxExec, evidence.Criterion); err != nil {
+		return evidence, err
 	}
 	if err := st.chargeExecOp(); err != nil {
-		return ev, err
+		return evidence, err
 	}
 	result, err := e.deps.Sandbox.Exec(ctx, ws.id, sandbox.ExecRequest{
 		Command: cmd,
@@ -198,18 +199,18 @@ func (e *Engine) execVerified(ctx context.Context, st *runState, task *domain.Ta
 	if err != nil {
 		// Cancellation and timeouts propagate so callers can distinguish
 		// "command ran and failed" from "command never completed".
-		return ev, err
+		return evidence, err
 	}
-	ev.ExitCode = result.ExitCode
-	ev.Passed = result.ExitCode == 0
+	evidence.ExitCode = result.ExitCode
+	evidence.Passed = result.ExitCode == 0
 
-	logRef, artifactErr := e.storeLogArtifact(ctx, st, task, ev.Criterion, result)
+	logRef, artifactErr := e.storeLogArtifact(ctx, st, task, evidence.Criterion, result)
 	if artifactErr == nil {
-		ev.LogArtifactID = logRef.ID
+		evidence.LogArtifactID = logRef.ID
 		st.addArtifactRef(logRef)
 	}
-	ev.At = e.deps.Clock.Now().UTC()
-	return ev, nil
+	evidence.At = e.deps.Clock.Now().UTC()
+	return evidence, nil
 }
 
 // ---- small helpers ----
@@ -220,9 +221,9 @@ func (e *Engine) lastUserRequest(ctx context.Context, tenantID domain.TenantID, 
 		return "", err
 	}
 	request := ""
-	for _, m := range messages {
-		if m.Role == domain.RoleUser {
-			request = m.Content
+	for _, message := range messages {
+		if message.Role == domain.RoleUser {
+			request = message.Content
 		}
 	}
 	if request == "" {
@@ -279,15 +280,15 @@ func (e *Engine) cancelTask(ctx context.Context, st *runState, task *domain.Task
 }
 
 func branchForTask(task *domain.Task) string {
-	return "ants/task-" + sanitizeBranch(task.Name)
+	return planner.BranchForTask(task.Name)
 }
 
 // classifyFailure prefers the error's own stable code so precise failure
 // identities survive into task records and reports.
 func classifyFailure(err error) string {
-	var dom *domain.Error
-	if errors.As(err, &dom) && dom.Code != "" {
-		return dom.Code
+	var typed *domain.Error
+	if errors.As(err, &typed) && typed.Code != "" {
+		return typed.Code
 	}
 	switch domain.ErrKindOf(err) {
 	case domain.ErrKindPolicyDenied:
@@ -308,9 +309,9 @@ func isCancellation(err error) bool {
 	return domain.ErrKindOf(err) == domain.ErrKindCancelled || errors.Is(err, context.Canceled)
 }
 
-func indexIn(tasks []*domain.Task, t *domain.Task) int {
+func indexIn(tasks []*domain.Task, task *domain.Task) int {
 	for i, candidate := range tasks {
-		if candidate.ID == t.ID {
+		if candidate.ID == task.ID {
 			return i
 		}
 	}
@@ -318,24 +319,29 @@ func indexIn(tasks []*domain.Task, t *domain.Task) int {
 }
 
 func firstFailedTask(st *runState) *domain.Task {
-	for _, t := range st.tasks {
-		if t.Status == domain.TaskFailed {
-			return t
+	for _, task := range st.tasks {
+		if task.Status == domain.TaskFailed {
+			return task
 		}
 	}
-	for _, t := range st.tasks {
-		if t.Status == domain.TaskCancelled {
-			return t
+	for _, task := range st.tasks {
+		if task.Status == domain.TaskBlocked {
+			return task
+		}
+	}
+	for _, task := range st.tasks {
+		if task.Status == domain.TaskCancelled {
+			return task
 		}
 	}
 	return nil
 }
 
 func safeDetail(err error) string {
-	msg := err.Error()
+	message := err.Error()
 	const maxLen = 512
-	if len(msg) > maxLen {
-		return msg[:maxLen]
+	if len(message) > maxLen {
+		return message[:maxLen]
 	}
-	return msg
+	return message
 }
