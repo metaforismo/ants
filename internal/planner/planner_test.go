@@ -93,7 +93,8 @@ func TestPlanBuildsValidatedTaskGraph(t *testing.T) {
 	if doc.Depth != 1 || strings.Join(doc.DependsOn, ",") != "implement-add,implement-multiply" {
 		t.Fatalf("dependent task has wrong graph metadata: %+v", doc)
 	}
-	if got := []string{out.Tasks[0].Name, out.Tasks[1].Name, out.Tasks[2].Name}; strings.Join(got, ",") != "implement-add,implement-multiply,document-arithmetic" {
+	got := []string{out.Tasks[0].Name, out.Tasks[1].Name, out.Tasks[2].Name}
+	if strings.Join(got, ",") != "implement-add,implement-multiply,document-arithmetic" {
 		t.Fatalf("unexpected topological order: %v", got)
 	}
 	if len(out.IntegratedVerification) == 0 {
