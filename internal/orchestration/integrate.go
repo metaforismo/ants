@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"sort"
 	"strings"
 	"time"
 
@@ -17,8 +16,8 @@ import (
 // a human decision (ADR-0007), so even local composition works on its own
 // branch.
 func (e *Engine) stageIntegrate(ctx context.Context, st *runState) error {
-	for _, t := range st.tasks {
-		if err := e.transitionTask(ctx, t, domain.TaskIntegrating); err != nil {
+	for _, task := range st.tasks {
+		if err := e.transitionTask(ctx, task, domain.TaskIntegrating); err != nil {
 			return err
 		}
 	}
@@ -29,9 +28,12 @@ func (e *Engine) stageIntegrate(ctx context.Context, st *runState) error {
 	}
 
 	var conflicts []string
-	for _, t := range sortedTasksByName(st.tasks) {
-		result, err := e.deps.SCM.Merge(ctx, st.repo, branch, branchForTask(t),
-			fmt.Sprintf("integrate %s (%s)", t.Name, t.ID))
+	// st.tasks is normalized into stable topological order. Merging a child
+	// before its parent can make a later parent merge an empty operation and
+	// hides the execution graph in the resulting commit history.
+	for _, task := range st.tasks {
+		result, err := e.deps.SCM.Merge(ctx, st.repo, branch, branchForTask(task),
+			fmt.Sprintf("integrate %s (%s)", task.Name, task.ID))
 		if err != nil {
 			return e.failRun(ctx, st, "integration_failed", err)
 		}
@@ -65,8 +67,8 @@ func (e *Engine) stageIntegrate(ctx context.Context, st *runState) error {
 	}
 	st.addArtifactRef(ref)
 
-	for _, t := range st.tasks {
-		if err := e.transitionTask(ctx, t, domain.TaskDone); err != nil {
+	for _, task := range st.tasks {
+		if err := e.transitionTask(ctx, task, domain.TaskDone); err != nil {
 			return err
 		}
 	}
@@ -90,21 +92,21 @@ func (e *Engine) stageVerifyIntegrated(ctx context.Context, st *runState) error 
 	}
 
 	criteria := st.spec.Spec.SuccessCriteria
-	cmds := st.spec.IntegratedVerification
-	indexAligned := len(criteria) == len(cmds)
+	commands := st.spec.IntegratedVerification
+	indexAligned := len(criteria) == len(commands)
 
 	var failed []string
-	for i, cmd := range cmds {
-		criterion := strings.Join(cmd, " ")
+	for i, command := range commands {
+		criterion := strings.Join(command, " ")
 		if indexAligned {
 			criterion = criteria[i]
 		}
-		ev, err := e.execWithRetries(ctx, st, sbx, cmd, criterion)
+		evidence, err := e.execWithRetries(ctx, st, sbx, command, criterion)
 		if err != nil {
 			return e.failRun(ctx, st, "verification_execution", err)
 		}
-		st.evidence = append(st.evidence, ev)
-		if !ev.Passed {
+		st.evidence = append(st.evidence, evidence)
+		if !evidence.Passed {
 			failed = append(failed, criterion)
 		}
 	}
@@ -258,11 +260,11 @@ func (e *Engine) checkCancelled(ctx context.Context, st *runState) error {
 		}
 		_ = e.emitEvent(ctx, evtFromRun(st.run, domain.EventRunStatusChanged, map[string]any{"to": string(domain.RunCancelled)}))
 	}
-	for _, t := range st.tasks {
-		switch t.Status {
+	for _, task := range st.tasks {
+		switch task.Status {
 		case domain.TaskDone, domain.TaskFailed, domain.TaskCancelled:
 		default:
-			_ = e.cancelTask(ctx, st, t)
+			_ = e.cancelTask(ctx, st, task)
 		}
 	}
 	switch st.thread.Status {
@@ -285,23 +287,23 @@ func (e *Engine) checkCancelled(ctx context.Context, st *runState) error {
 
 func (st *runState) buildReport(ready bool) *domain.RunReport {
 	reportTasks := make([]domain.ReportTask, 0, len(st.tasks))
-	for _, t := range st.tasks {
-		rt := domain.ReportTask{
-			ID:       t.ID,
-			Name:     t.Name,
-			Branch:   branchForTask(t),
-			Status:   t.Status,
-			Attempts: t.Attempts,
-			Failure:  t.Failure,
+	for _, task := range st.tasks {
+		reportTask := domain.ReportTask{
+			ID:       task.ID,
+			Name:     task.Name,
+			Branch:   branchForTask(task),
+			Status:   task.Status,
+			Attempts: task.Attempts,
+			Failure:  task.Failure,
 		}
-		if res := st.resultFor(t); res != nil {
-			rt.CommitSHA = res.headSHA
+		if result := st.resultFor(task); result != nil {
+			reportTask.CommitSHA = result.headSHA
 		}
-		reportTasks = append(reportTasks, rt)
+		reportTasks = append(reportTasks, reportTask)
 	}
 	verificationPassed := len(st.evidence) > 0
-	for _, ev := range st.evidence {
-		if !ev.Passed {
+	for _, evidence := range st.evidence {
+		if !evidence.Passed {
 			verificationPassed = false
 		}
 	}
@@ -345,10 +347,10 @@ func (st *runState) specContent() domain.SpecContent {
 	}
 }
 
-func (st *runState) resultFor(t *domain.Task) *taskResult {
-	for _, r := range st.results {
-		if r.task != nil && r.task.ID == t.ID {
-			return r
+func (st *runState) resultFor(task *domain.Task) *taskResult {
+	for _, result := range st.results {
+		if result.task != nil && result.task.ID == task.ID {
+			return result
 		}
 	}
 	return nil
@@ -363,8 +365,8 @@ func (st *runState) finishedAtOrNow() time.Time {
 
 func summarize(st *runState, ready bool) string {
 	done := 0
-	for _, t := range st.tasks {
-		if t.Status == domain.TaskDone {
+	for _, task := range st.tasks {
+		if task.Status == domain.TaskDone {
 			done++
 		}
 	}
@@ -377,27 +379,21 @@ func summarize(st *runState, ready bool) string {
 }
 
 func countBlockers(findings []domain.Finding) int {
-	n := 0
-	for _, f := range findings {
-		if f.Blocking() {
-			n++
+	count := 0
+	for _, finding := range findings {
+		if finding.Blocking() {
+			count++
 		}
 	}
-	return n
+	return count
 }
 
-func jsonBytes(v any) []byte {
-	b, err := json.MarshalIndent(v, "", "  ")
+func jsonBytes(value any) []byte {
+	encoded, err := json.MarshalIndent(value, "", "  ")
 	if err != nil {
 		return []byte(fmt.Sprintf(`{"error":"report serialization failed: %v"}`, err))
 	}
-	return b
-}
-
-func sortedTasksByName(tasks []*domain.Task) []*domain.Task {
-	out := append([]*domain.Task(nil), tasks...)
-	sort.Slice(out, func(i, j int) bool { return out[i].Name < out[j].Name })
-	return out
+	return encoded
 }
 
 func integrationBranchName(runID domain.RunID) string {
@@ -405,22 +401,22 @@ func integrationBranchName(runID domain.RunID) string {
 	return "ants/integration-" + sanitizeBranch(suffix)
 }
 
-func sanitizeBranch(s string) string {
-	var b strings.Builder
+func sanitizeBranch(value string) string {
+	var builder strings.Builder
 	lastDash := false
-	for _, r := range strings.ToLower(s) {
+	for _, character := range strings.ToLower(value) {
 		switch {
-		case r >= 'a' && r <= 'z', r >= '0' && r <= '9':
-			b.WriteRune(r)
+		case character >= 'a' && character <= 'z', character >= '0' && character <= '9':
+			builder.WriteRune(character)
 			lastDash = false
 		default:
-			if !lastDash && b.Len() > 0 {
-				b.WriteByte('-')
+			if !lastDash && builder.Len() > 0 {
+				builder.WriteByte('-')
 				lastDash = true
 			}
 		}
 	}
-	out := strings.Trim(b.String(), "-")
+	out := strings.Trim(builder.String(), "-")
 	if out == "" {
 		out = "run"
 	}
