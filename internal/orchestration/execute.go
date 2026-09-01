@@ -3,7 +3,6 @@ package orchestration
 import (
 	"context"
 	"fmt"
-	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -83,8 +82,8 @@ func (st *runState) addArtifactRef(ref domain.ReportArtifactRef) {
 }
 
 func (st *runState) anyTaskFailed() bool {
-	for _, t := range st.tasks {
-		if t.Status == domain.TaskFailed || t.Status == domain.TaskCancelled {
+	for _, task := range st.tasks {
+		if task.Status == domain.TaskFailed || task.Status == domain.TaskBlocked || task.Status == domain.TaskCancelled {
 			return true
 		}
 	}
@@ -229,6 +228,10 @@ func (e *Engine) stagePlanning(ctx context.Context, st *runState) error {
 	if err != nil {
 		return e.failRun(ctx, st, "plan_failed", err)
 	}
+	planned, err = planner.NormalizeOutput(planned)
+	if err != nil {
+		return e.failRun(ctx, st, "plan_failed", err)
+	}
 	st.spec = planned
 
 	specID, err := e.newID(domain.PrefixSpec)
@@ -267,27 +270,8 @@ func (e *Engine) stagePlanning(ctx context.Context, st *runState) error {
 		return err
 	}
 
-	for _, tmpl := range planned.Tasks {
-		if err := st.reserveTaskBudget(); err != nil {
-			return e.failRunBudgetExhausted(ctx, st, err)
-		}
-		taskID, err := e.newID(domain.PrefixTask)
-		if err != nil {
-			return err
-		}
-		task, err := domain.NewTask(domain.TaskID(taskID), st.run.TenantID, st.run.ID, st.run.ThreadID,
-			tmpl.Name, domain.TaskKindCodeChange, 0, nil, e.cfg.MaxAttempts, e.deps.Clock.Now())
-		if err != nil {
-			return e.failRun(ctx, st, "task_invalid", err)
-		}
-		if err := e.deps.Tasks.Create(ctx, task); err != nil {
-			return e.failRun(ctx, st, "task_persist", err)
-		}
-		st.taskTemplates[task.ID] = tmpl
-		st.tasks = append(st.tasks, task)
-		if err := e.emitEvent(ctx, evtFromTask(task, domain.EventTaskCreated, map[string]any{"name": tmpl.Name})); err != nil {
-			return err
-		}
+	if err := e.persistPlannedTasks(ctx, st, planned.Tasks); err != nil {
+		return err
 	}
 	if err := e.transitionThread(ctx, st.thread, domain.ThreadReadyToExecute); err != nil {
 		return err
@@ -298,97 +282,57 @@ func (e *Engine) stagePlanning(ctx context.Context, st *runState) error {
 // ---- task execution ----
 
 func (e *Engine) stageTasks(ctx context.Context, st *runState) error {
-	results := make([]*taskResult, len(st.tasks))
-	failures := make([]error, len(st.tasks))
-
-	var wg sync.WaitGroup
-	sem := make(chan struct{}, e.cfg.MaxParallelTasks)
-	for i, task := range st.tasks {
-		wg.Add(1)
-		go func(index int, t *domain.Task) {
-			defer wg.Done()
-			sem <- struct{}{}
-			defer func() { <-sem }()
-			results[index], failures[index] = e.executeTask(ctx, st, t, st.taskTemplates[t.ID])
-		}(i, task)
-	}
-	wg.Wait()
-
-	for i, res := range results {
-		if res == nil {
-			continue
-		}
-		st.results = append(st.results, res)
-		st.evidence = append(st.evidence, res.evidence...)
-		_ = failures[i]
-	}
-	sort.SliceStable(st.results, func(i, j int) bool {
-		return indexIn(st.tasks, st.results[i].task) < indexIn(st.tasks, st.results[j].task)
-	})
-	// After the join, every task must be in a state the pipeline understands.
-	// Anything else is an orchestration bug and must not be papered over.
-	var stuck []string
-	for _, t := range st.tasks {
-		switch t.Status {
-		case domain.TaskVerifying, domain.TaskDone, domain.TaskFailed, domain.TaskCancelled:
-		default:
-			stuck = append(stuck, fmt.Sprintf("%s=%s", t.Name, t.Status))
-		}
-	}
-	if len(stuck) > 0 {
-		return fmt.Errorf("tasks left in intermediate states: %s", strings.Join(stuck, ", "))
-	}
-	return nil
+	return e.executeTaskGraph(ctx, st)
 }
 
 // executeTask moves one task through queued -> provisioning -> working ->
 // verifying with bounded retries for transient failures only.
 func (e *Engine) executeTask(ctx context.Context, st *runState, task *domain.Task, tmpl planner.TaskTemplate) (*taskResult, error) {
-	res := &taskResult{task: task}
+	result := &taskResult{task: task}
 	if err := e.transitionTask(ctx, task, domain.TaskQueued); err != nil {
-		return res, err
+		return result, err
 	}
 	for {
 		if ctx.Err() != nil {
-			return res, e.cancelTask(ctx, st, task)
+			return result, e.cancelTask(ctx, st, task)
 		}
 		if err := task.BeginAttempt(); err != nil {
-			return res, e.failTaskTerminal(ctx, st, task, "attempts_exhausted", err)
+			return result, e.failTaskTerminal(ctx, st, task, "attempts_exhausted", err)
 		}
 		expected := task.Version
 		if err := e.deps.Tasks.Update(ctx, task, expected); err != nil {
-			return res, err
+			return result, err
 		}
 
 		attemptCtx, stop := context.WithTimeout(ctx, e.cfg.TaskTimeout)
-		outcomeErr := e.attemptTask(attemptCtx, st, task, tmpl, res)
+		outcomeErr := e.attemptTask(attemptCtx, st, task, tmpl, result)
 		stop()
 
 		switch {
 		case outcomeErr == nil:
-			return res, nil
+			return result, nil
 		case isCancellation(outcomeErr):
-			return res, e.cancelTask(ctx, st, task)
+			return result, e.cancelTask(ctx, st, task)
 		case domain.IsRetryable(outcomeErr):
 			failure := &domain.FailureInfo{Code: "transient_failure", Message: outcomeErr.Error(), Transient: true}
 			if err := e.markTaskFailed(ctx, task, failure); err != nil {
-				return res, err
+				return result, err
 			}
 			if err := e.transitionTask(ctx, task, domain.TaskQueued); err != nil {
-				return res, err
+				return result, err
 			}
 			backoff := e.cfg.RetryBackoff << uint(task.Attempts-1)
 			if sleepErr := e.deps.Sleeper.Sleep(ctx, backoff); sleepErr != nil || ctx.Err() != nil {
-				return res, e.cancelTask(ctx, st, task)
+				return result, e.cancelTask(ctx, st, task)
 			}
 		default:
 			code := classifyFailure(outcomeErr)
-			return res, e.failTaskTerminal(ctx, st, task, code, outcomeErr)
+			return result, e.failTaskTerminal(ctx, st, task, code, outcomeErr)
 		}
 	}
 }
 
-func (e *Engine) attemptTask(ctx context.Context, st *runState, task *domain.Task, tmpl planner.TaskTemplate, res *taskResult) error {
+func (e *Engine) attemptTask(ctx context.Context, st *runState, task *domain.Task, tmpl planner.TaskTemplate, result *taskResult) error {
 	sbx, err := e.newWorkspace(ctx, st)
 	if err != nil {
 		return fmt.Errorf("provision task workspace: %w", err)
@@ -396,8 +340,8 @@ func (e *Engine) attemptTask(ctx context.Context, st *runState, task *domain.Tas
 	if err := e.transitionTask(ctx, task, domain.TaskProvisioning); err != nil {
 		return err
 	}
-	branch := branchForTask(task)
-	if err := e.deps.SCM.CreateBranch(ctx, st.repo, branch, st.project.DefaultBranch); err != nil {
+	branch, err := e.prepareTaskBranch(ctx, st, task, tmpl)
+	if err != nil {
 		return err
 	}
 
@@ -408,14 +352,14 @@ func (e *Engine) attemptTask(ctx context.Context, st *runState, task *domain.Tas
 		return err
 	}
 	files := make(map[string][]byte, len(tmpl.Files))
-	for path, content := range tmpl.Files {
-		files[path] = []byte(content)
+	for filePath, content := range tmpl.Files {
+		files[filePath] = []byte(content)
 	}
 	commit, err := e.deps.SCM.CommitFiles(ctx, st.repo, branch, tmpl.CommitMessage, files)
 	if err != nil {
 		return err
 	}
-	res.headSHA = commit.SHA
+	result.headSHA = commit.SHA
 	if err := e.emitEvent(ctx, evtFromTask(task, domain.EventWorkspaceCommitted, map[string]any{
 		"branch": branch,
 		"sha":    commit.SHA,
@@ -433,15 +377,15 @@ func (e *Engine) attemptTask(ctx context.Context, st *runState, task *domain.Tas
 	if err := e.materialize(ctx, sbx, treeFiles); err != nil {
 		return err
 	}
-	for _, cmd := range tmpl.VerifyCommands {
-		ev, err := e.execVerified(ctx, st, task, sbx, cmd, "")
+	for _, command := range tmpl.VerifyCommands {
+		evidence, err := e.execVerified(ctx, st, task, sbx, command, "")
 		if err != nil {
 			return err
 		}
-		res.evidence = append(res.evidence, ev)
-		if !ev.Passed {
+		result.evidence = append(result.evidence, evidence)
+		if !evidence.Passed {
 			return domain.Invalidf("task_verification_failed",
-				"verification command %q exited %d", strings.Join(cmd, " "), ev.ExitCode)
+				"verification command %q exited %d", strings.Join(command, " "), evidence.ExitCode)
 		}
 	}
 	return nil
