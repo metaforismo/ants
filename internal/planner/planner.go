@@ -25,12 +25,16 @@ type PlanInput struct {
 	RepoFiles map[string][]byte
 }
 
-// TaskTemplate is one unit of isolated work produced by planning.
+// TaskTemplate is one unit of isolated work produced by planning. DependsOn
+// names other templates in the same output; NormalizeOutput resolves the DAG,
+// computes Depth, and assigns the canonical branch.
 type TaskTemplate struct {
 	Name           string            `json:"name"`
 	Branch         string            `json:"branch"`
 	CommitMessage  string            `json:"commit_message"`
 	Writes         []string          `json:"writes"`
+	DependsOn      []string          `json:"depends_on"`
+	Depth          int               `json:"depth"`
 	Files          map[string]string `json:"files"`
 	VerifyCommands [][]string        `json:"verify_commands"`
 }
@@ -70,6 +74,7 @@ type capabilitySpec struct {
 type capabilityTask struct {
 	Name           string            `yaml:"name"`
 	Writes         []string          `yaml:"writes"`
+	DependsOn      []string          `yaml:"depends_on"`
 	CommitMessage  string            `yaml:"commit_message"`
 	Files          map[string]string `yaml:"files"`
 	VerifyCommands [][]string        `yaml:"verify"`
@@ -110,27 +115,34 @@ func (c *Catalog) validate() error {
 		return domain.Invalidf("capabilities_catalog", "catalog declares no capabilities")
 	}
 	seen := map[string]bool{}
-	for _, cap := range c.Capabilities {
-		if cap.ID == "" || seen[cap.ID] {
+	for i := range c.Capabilities {
+		capability := &c.Capabilities[i]
+		capability.ID = strings.TrimSpace(capability.ID)
+		if capability.ID == "" || seen[capability.ID] {
 			return domain.Invalidf("capabilities_catalog", "capability ids must be unique and non-empty")
 		}
-		seen[cap.ID] = true
-		if len(cap.RequestKeywords) == 0 {
-			return domain.Invalidf("capabilities_catalog", "capability %q declares no request keywords", cap.ID)
+		seen[capability.ID] = true
+		if len(capability.RequestKeywords) == 0 {
+			return domain.Invalidf("capabilities_catalog", "capability %q declares no request keywords", capability.ID)
 		}
-		if len(cap.Tasks) == 0 {
-			return domain.Invalidf("capabilities_catalog", "capability %q declares no tasks", cap.ID)
-		}
-		for _, t := range cap.Tasks {
-			if t.Name == "" || t.CommitMessage == "" {
-				return domain.Invalidf("capabilities_catalog", "task %q needs name and commit message", t.Name)
+		for keywordIndex, keyword := range capability.RequestKeywords {
+			keyword = strings.TrimSpace(keyword)
+			if keyword == "" {
+				return domain.Invalidf("capabilities_catalog", "capability %q request keyword %d is empty", capability.ID, keywordIndex)
 			}
-			if len(t.Files) == 0 {
-				return domain.Invalidf("capabilities_catalog", "task %q writes no files", t.Name)
-			}
+			capability.RequestKeywords[keywordIndex] = keyword
 		}
-		if len(cap.VerifyAll) == 0 {
-			return domain.Invalidf("capabilities_catalog", "capability %q declares no integrated verification commands", cap.ID)
+		if strings.TrimSpace(capability.Spec.Outcome) == "" {
+			return domain.Invalidf("capabilities_catalog", "capability %q has no outcome", capability.ID)
+		}
+		if len(capability.Spec.SuccessCriteria) == 0 {
+			return domain.Invalidf("capabilities_catalog", "capability %q has no success criteria", capability.ID)
+		}
+		if _, err := NormalizeOutput(outputForCapability(capability)); err != nil {
+			if typed, ok := err.(*domain.Error); ok {
+				return typed.WithDetail("capability_id", capability.ID)
+			}
+			return err
 		}
 	}
 	return nil
@@ -151,21 +163,21 @@ func (d *Deterministic) Plan(_ context.Context, input PlanInput) (*Output, error
 	request := strings.ToLower(input.Request)
 	var candidates []*Capability
 	for i := range cat.Capabilities {
-		cap := &cat.Capabilities[i]
+		capability := &cat.Capabilities[i]
 		matches := true
-		for _, kw := range cap.RequestKeywords {
-			if !strings.Contains(request, strings.ToLower(kw)) {
+		for _, keyword := range capability.RequestKeywords {
+			if !strings.Contains(request, strings.ToLower(keyword)) {
 				matches = false
 				break
 			}
 		}
 		if matches {
-			candidates = append(candidates, cap)
+			candidates = append(candidates, capability)
 		}
 	}
 	switch len(candidates) {
 	case 1:
-		return d.render(candidates[0]), nil
+		return d.render(candidates[0])
 	case 0:
 		return nil, &domain.Error{
 			Kind:    domain.ErrKindInvalid,
@@ -175,8 +187,8 @@ func (d *Deterministic) Plan(_ context.Context, input PlanInput) (*Output, error
 		}
 	default:
 		ids := make([]string, 0, len(candidates))
-		for _, c := range candidates {
-			ids = append(ids, c.ID)
+		for _, candidate := range candidates {
+			ids = append(ids, candidate.ID)
 		}
 		return nil, &domain.Error{
 			Kind:    domain.ErrKindConflict,
@@ -187,44 +199,38 @@ func (d *Deterministic) Plan(_ context.Context, input PlanInput) (*Output, error
 	}
 }
 
-func (d *Deterministic) render(cap *Capability) *Output {
-	tasks := make([]TaskTemplate, 0, len(cap.Tasks))
-	for _, t := range cap.Tasks {
-		files := make(map[string]string, len(t.Files))
-		writes := append([]string(nil), t.Writes...)
-		if writes == nil {
-			for path := range t.Files {
-				writes = append(writes, path)
-			}
-		}
-		for k, v := range t.Files {
-			files[k] = v
-		}
+func (d *Deterministic) render(capability *Capability) (*Output, error) {
+	return NormalizeOutput(outputForCapability(capability))
+}
+
+func outputForCapability(capability *Capability) *Output {
+	tasks := make([]TaskTemplate, 0, len(capability.Tasks))
+	for _, task := range capability.Tasks {
 		tasks = append(tasks, TaskTemplate{
-			Name:           t.Name,
-			Branch:         branchFor(t.Name),
-			CommitMessage:  t.CommitMessage,
-			Writes:         writes,
-			Files:          files,
-			VerifyCommands: t.VerifyCommands,
+			Name:           task.Name,
+			CommitMessage:  task.CommitMessage,
+			Writes:         task.Writes,
+			DependsOn:      task.DependsOn,
+			Files:          task.Files,
+			VerifyCommands: task.VerifyCommands,
 		})
 	}
 	return &Output{
 		Spec: domain.SpecContent{
-			Outcome:         cap.Spec.Outcome,
-			Requirements:    cap.Spec.Requirements,
-			Assumptions:     cap.Spec.Assumptions,
-			NonGoals:        cap.Spec.NonGoals,
-			SuccessCriteria: cap.Spec.SuccessCriteria,
-			Blockers:        cap.Spec.Blockers,
+			Outcome:         capability.Spec.Outcome,
+			Requirements:    capability.Spec.Requirements,
+			Assumptions:     capability.Spec.Assumptions,
+			NonGoals:        capability.Spec.NonGoals,
+			SuccessCriteria: capability.Spec.SuccessCriteria,
+			Blockers:        capability.Spec.Blockers,
 		},
 		Tasks:                  tasks,
-		IntegratedVerification: cap.VerifyAll,
+		IntegratedVerification: capability.VerifyAll,
 	}
 }
 
-// branchFor derives a stable, collision-free branch name per template name.
-func branchFor(taskName string) string {
+// BranchForTask derives the stable branch assigned to one task name.
+func BranchForTask(taskName string) string {
 	slug := strings.Map(func(r rune) rune {
 		switch {
 		case r >= 'a' && r <= 'z', r >= '0' && r <= '9':
@@ -240,15 +246,17 @@ func branchFor(taskName string) string {
 	}
 	slug = strings.Trim(slug, "-")
 	if slug == "" {
-		return "ants/task"
+		slug = "run"
 	}
-	return "ants/" + slug
+	return "ants/task-" + slug
 }
+
+func branchFor(taskName string) string { return BranchForTask(taskName) }
 
 func declaredIDs(cat *Catalog) []string {
 	out := make([]string, 0, len(cat.Capabilities))
-	for _, c := range cat.Capabilities {
-		out = append(out, c.ID)
+	for _, capability := range cat.Capabilities {
+		out = append(out, capability.ID)
 	}
 	return out
 }
