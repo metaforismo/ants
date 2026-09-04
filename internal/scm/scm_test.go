@@ -117,6 +117,50 @@ func TestDriverContract(t *testing.T) {
 	}
 }
 
+func TestMergeAlreadyContainedIsNoOp(t *testing.T) {
+	ctx := context.Background()
+	for _, drv := range driversUnderTest(t) {
+		t.Run(drv.Name(), func(t *testing.T) {
+			root := t.TempDir()
+			if drv.Name() == "memory" {
+				root = "mem:" + root
+			}
+			h := newHandle(drv, root)
+			if err := drv.Init(ctx, h, Seed{DefaultBranch: "main", Files: map[string][]byte{"README.md": []byte("demo\n")}}); err != nil {
+				t.Fatal(err)
+			}
+			if err := drv.CreateBranch(ctx, h, "parent", "main"); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := drv.CommitFiles(ctx, h, "parent", "parent", map[string][]byte{"parent.txt": []byte("parent\n")}); err != nil {
+				t.Fatal(err)
+			}
+			if err := drv.CreateBranch(ctx, h, "child", "parent"); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := drv.CommitFiles(ctx, h, "child", "child", map[string][]byte{"child.txt": []byte("child\n")}); err != nil {
+				t.Fatal(err)
+			}
+
+			before, err := drv.Head(ctx, h, "child")
+			if err != nil {
+				t.Fatal(err)
+			}
+			merged, err := drv.Merge(ctx, h, "child", "parent", "merge contained parent")
+			if err != nil || merged.HasConflicts() {
+				t.Fatalf("contained merge failed: %+v %v", merged, err)
+			}
+			after, err := drv.Head(ctx, h, "child")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if merged.SHA != before || after != before {
+				t.Fatalf("contained merge must preserve target head: before=%s result=%s after=%s", before, merged.SHA, after)
+			}
+		})
+	}
+}
+
 func TestMergeConflictIsReportedNotResolved(t *testing.T) {
 	ctx := context.Background()
 	for _, drv := range driversUnderTest(t) {

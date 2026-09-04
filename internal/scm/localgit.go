@@ -92,8 +92,7 @@ func (g *LocalGit) run(ctx context.Context, root string, args ...string) ([]byte
 	}
 }
 
-// runExpectingFailure distinguishes expected git failures (conflicts) from
-// real errors.
+// runAllowExit distinguishes expected git failures (conflicts) from real errors.
 func (g *LocalGit) runAllowExit(ctx context.Context, root string, args ...string) ([]byte, int, error) {
 	runCtx, cancel := context.WithTimeout(ctx, gitTimeout)
 	defer cancel()
@@ -233,11 +232,27 @@ func (g *LocalGit) Merge(ctx context.Context, h Handle, targetBranch, sourceBran
 			conflicted = out
 		}
 		conflicts := nonEmptyLines(string(conflicted))
-		// Abort so the target branch stays exactly as before: conflict
+		// Abort so the target branch stays exactly where it was. Conflict
 		// resolution is a planner decision, never a silent pick.
 		_, _ = g.run(ctx, h.Root, "merge", "--abort")
 		return MergeResult{Conflicts: conflicts}, nil
 	}
+
+	// `git merge --no-commit` exits zero both when it prepared a merge and
+	// when source is already contained in target. The latter has no MERGE_HEAD;
+	// committing in that state would turn a harmless no-op into an SCM error.
+	_, mergeHeadCode, mergeHeadErr := g.runAllowExit(ctx, h.Root, "rev-parse", "--quiet", "--verify", "MERGE_HEAD")
+	if mergeHeadErr != nil {
+		return MergeResult{}, mergeHeadErr
+	}
+	if mergeHeadCode != 0 {
+		head, err := g.headLocked(ctx, h, targetBranch)
+		if err != nil {
+			return MergeResult{}, err
+		}
+		return MergeResult{SHA: head}, nil
+	}
+
 	if _, err := g.run(ctx, h.Root, "commit", "--no-verify", "-m", message); err != nil {
 		return MergeResult{}, err
 	}

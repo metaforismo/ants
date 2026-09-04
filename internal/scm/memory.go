@@ -153,6 +153,11 @@ func (m *Memory) Merge(_ context.Context, h Handle, targetBranch, sourceBranch, 
 	}
 
 	baseSHA := m.mergeBase(repo, oursTip, theirsTip)
+	// If source is already an ancestor of target, merging it again is a
+	// semantic no-op. Match real Git and preserve the target SHA.
+	if baseSHA == theirsTip {
+		return MergeResult{SHA: oursTip}, nil
+	}
 	baseFiles := map[string][]byte{}
 	if baseSHA != "" {
 		baseFiles = repo.commits[baseSHA].files

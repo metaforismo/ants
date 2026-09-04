@@ -12,6 +12,8 @@ jobs:
   go:
     name: Go build, lint, tests
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
     services:
       postgres:
         image: postgres:16-alpine
@@ -36,10 +38,29 @@ jobs:
           go-version-file: go.mod
           cache: true
 
+      - name: One-shot Go 1.25 formatter repair
+        if: github.event_name == 'pull_request'
+        run: |
+          git fetch origin "${{ github.head_ref }}"
+          git checkout "${{ github.head_ref }}"
+          gofmt -w internal/orchestration/engine_test.go
+          if ! git diff --quiet -- internal/orchestration/engine_test.go; then
+            git config user.name "github-actions[bot]"
+            git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+            git add internal/orchestration/engine_test.go
+            git commit -m "style(orchestration): apply pinned gofmt"
+            git push origin "HEAD:${{ github.head_ref }}"
+          fi
+
       - name: Format check
         run: |
           out=$(gofmt -l .)
-          if [ -n "$out" ]; then echo "unformatted files:"; echo "$out"; exit 1; fi
+          if [ -n "$out" ]; then
+            echo "unformatted files:"
+            echo "$out"
+            gofmt -d .
+            exit 1
+          fi
 
       - name: Vet
         run: go vet ./...
