@@ -39,7 +39,12 @@ jobs:
       - name: Format check
         run: |
           out=$(gofmt -l .)
-          if [ -n "$out" ]; then echo "unformatted files:"; echo "$out"; exit 1; fi
+          if [ -n "$out" ]; then
+            echo "unformatted files:"
+            echo "$out"
+            gofmt -d .
+            exit 1
+          fi
 
       - name: Vet
         run: go vet ./...
